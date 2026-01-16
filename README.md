@@ -1,6 +1,6 @@
-# SAGE Backend – NestJS Conversion ✨
+# StudyGAI Backend –
 
-This repository contains the SAGE backend rewritten with NestJS and TypeScript. It provides authentication, course management, document upload & PDF text extraction, and a chat interface that includes PDF context when available.
+This repository contains the StudyGAI backend written with NestJS and TypeScript. It provides authentication, course management, document upload & PDF text extraction, and a chat interface that includes PDF context when available.
 
 ## Key Features
 
@@ -135,7 +135,7 @@ npm install -D @types/pdf-parse --legacy-peer-deps
 ---
 
 Built with ❤️ using NestJS & TypeScript
-# SAGE Backend – NestJS Conversion ✨
+# StudyGAI Backend 
 
 This is a **complete conversion** of the original Express.js + Mongoose backend into a modern **NestJS TypeScript** application.
 
