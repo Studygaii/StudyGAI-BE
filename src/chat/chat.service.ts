@@ -6,6 +6,7 @@ import { ChatDocument } from '../schemas/chat.schema';
 import { CourseDocument } from '../schemas/course.schema';
 import { GroqService } from '../common/groq.service';
 import { PdfService } from '../pdf/pdf.service';
+import { QdrantService } from '../qdrant/qdrant.service';
 import { default as mongoose } from 'mongoose';
 
 @Injectable()
@@ -15,6 +16,7 @@ export class ChatService {
     @InjectModel('courses') private courseModel: Model<CourseDocument>, // typed course model
     private groq: GroqService,
     private pdfService: PdfService,
+    private qdrantService: QdrantService, // inject Qdrant for vector search
   ) {}
 
   async list(courseID: string, userID: string) {
@@ -146,6 +148,119 @@ export class ChatService {
         return { message: 'Message added successfully', chat };
       } catch (error) {
         return { status: 500, error: error.message };
+      }
+    }
+
+    /**
+     * Check if a message contains @studyGAI mention
+     */
+    private hasStudyGAIMention(content: string): boolean {
+      return /@studyGAI/i.test(content);
+    }
+
+    /**
+     * Extract context from vector search when @studyGAI is mentioned
+     */
+    async getStudyGAIContext(
+      message: string,
+      courseId: string,
+      limit: number = 3,
+    ): Promise<string> {
+      try {
+        // Extract the actual query after @studyGAI
+        const queryMatch = message.match(/@studyGAI\s+(.+?)(?:\s*$|\s+@|\n)/i);
+        const query = queryMatch ? queryMatch[1].trim() : message.replace(/@studyGAI/i, '').trim();
+
+        if (!query) {
+          return ''; // No specific query
+        }
+
+        // Search for similar content in vector database
+        const results = await this.qdrantService.searchSimilarChunks(
+          query,
+          courseId,
+          limit,
+        );
+
+        if (results.length === 0) {
+          return '';
+        }
+
+        // Format results as context
+        const contextLines = results.map((r, idx) => {
+          return `[Relevant Context ${idx + 1}]\n${r.text}`;
+        });
+
+        return `\n\n--- Context from course materials ---\n${contextLines.join('\n\n')}`;
+      } catch (error) {
+        console.warn(`Failed to get @studyGAI context: ${error.message}`);
+        return '';
+      }
+    }
+
+    /**
+     * Send messages with @studyGAI context injection
+     */
+    async sendWithContext(messages: any[], courseId?: string) {
+      try {
+        if (!courseId || messages.length === 0) {
+          return this.send(messages, courseId);
+        }
+
+        // Get last user message
+        const lastMessage = messages[messages.length - 1];
+        const userContent = lastMessage?.content || '';
+
+        // Check for @studyGAI mention
+        if (this.hasStudyGAIMention(userContent)) {
+          const context = await this.getStudyGAIContext(userContent, courseId);
+
+          if (context) {
+            // Inject context into the message
+            messages[messages.length - 1] = {
+              ...lastMessage,
+              content: userContent + context,
+            };
+          }
+        }
+
+        return this.send(messages, courseId);
+      } catch (error) {
+        console.error('sendWithContext error:', error);
+        return this.send(messages, courseId);
+      }
+    }
+
+    /**
+     * Send messages with streaming and @studyGAI context
+     */
+    async sendStreamWithContext(messages: any[], courseId?: string) {
+      try {
+        if (!courseId || messages.length === 0) {
+          return this.sendStream(messages, courseId);
+        }
+
+        // Get last user message
+        const lastMessage = messages[messages.length - 1];
+        const userContent = lastMessage?.content || '';
+
+        // Check for @studyGAI mention
+        if (this.hasStudyGAIMention(userContent)) {
+          const context = await this.getStudyGAIContext(userContent, courseId);
+
+          if (context) {
+            // Inject context into the message
+            messages[messages.length - 1] = {
+              ...lastMessage,
+              content: userContent + context,
+            };
+          }
+        }
+
+        return this.sendStream(messages, courseId);
+      } catch (error) {
+        console.error('sendStreamWithContext error:', error);
+        return this.sendStream(messages, courseId);
       }
     }
 }

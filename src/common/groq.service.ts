@@ -36,50 +36,11 @@ export class GroqService {
 
   async chatWithPDF(pdfContent: string, messages: any[]) {
     try {
-      // Keep PDF context small to avoid hitting Groq token limits.
-      // We'll try to extract the most relevant snippets based on the last user query.
-      const globalMaxChars = 20000; // conservative char limit for pdf context
-
-      const getLastUserText = (msgs: any[]) => {
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i].role === 'user' && typeof msgs[i].content === 'string') return msgs[i].content;
-        }
-        return '';
-      };
-
-      const lastUserText = getLastUserText(messages) || '';
-
-      // Simple keyword extraction: take words longer than 4 chars, remove common stopwords
-      const stopwords = new Set(['which','that','this','there','where','when','what','your','would','could','should','about','because','while','their','those','these','with','from','have','like','just','also','into','than','then','such']);
-      const words = lastUserText
-        .replace(/[^a-zA-Z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .map(w => w.toLowerCase())
-        .filter(w => w.length > 4 && !stopwords.has(w));
-
-      const uniqueWords: string[] = Array.from(new Set(words)).slice(0, 8) as string[];
-
-      const gatherSnippets = (text: string, keywords: string[], maxChars: number) => {
-        if (!keywords.length) return text.substring(0, Math.min(1000, maxChars));
-        const snippets: string[] = [];
-        const window = Math.floor(maxChars / Math.max(1, keywords.length));
-        for (const kw of keywords) {
-          const idx = text.toLowerCase().indexOf(kw.toLowerCase());
-          if (idx !== -1) {
-            const start = Math.max(0, idx - Math.floor(window / 2));
-            const snip = text.substring(start, Math.min(text.length, start + window));
-            snippets.push(snip.trim());
-          }
-        }
-        // If no snippets found, fallback to start of document
-        if (snippets.length === 0) return text.substring(0, Math.min(maxChars, 2000));
-        // Join snippets with separators and ensure total length <= maxChars
-        let joined = snippets.join('\n\n[...snip...]\n\n');
-        if (joined.length > maxChars) joined = joined.substring(0, maxChars);
-        return joined;
-      };
-
-      const truncatedPdfContent = gatherSnippets(pdfContent, uniqueWords, globalMaxChars);
+      // Truncate PDF content to avoid hitting Groq token limits (20K chars is safe)
+      const maxChars = 20000;
+      const truncatedPdfContent = pdfContent.length > maxChars 
+        ? pdfContent.substring(0, maxChars) + '\n\n[... content truncated ...]' 
+        : pdfContent;
 
       // Add system message with PDF context
       const systemMessage = {

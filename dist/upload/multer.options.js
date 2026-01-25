@@ -13,13 +13,13 @@ exports.multerOptions = {
         },
     }),
     fileFilter: (req, file, callback) => {
-        if (!file.originalname.match(/\.(pdf|doc|docx|txt|ppt|pptx)$/)) {
+        if (!file.originalname.match(/\.(pdf|doc|docx|txt|ppt|pptx|md|markdown)$/i)) {
             return callback(new Error('Only document files are allowed!'), false);
         }
         callback(null, true);
     },
     limits: {
-        fileSize: 10 * 1024 * 1024, // 10MB
+        fileSize: 50 * 1024 * 1024,
     },
 };
 //# sourceMappingURL=multer.options.js.map

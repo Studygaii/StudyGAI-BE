@@ -1,33 +1,80 @@
-from fastapi import FastAPI, File, UploadFile
+"""
+Docling Document Processing Service
+Advanced PDF processing with:
+- Mathematical formula extraction (LaTeX preservation)
+- Image extraction and storage
+- Table detection and extraction
+- Vector embeddings for semantic search
+"""
+
+from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import JSONResponse
 import os
 import tempfile
 import logging
-import PyPDF2
-import traceback
-from pdf2image import convert_from_path
-import pytesseract
-from PIL import Image
+from pathlib import Path
+from typing import Dict, Any
+
+try:
+    from docling.document_converter import DocumentConverter
+    from docling.datastructures import ConvertedDocument
+except ImportError:
+    DocumentConverter = None
+    ConvertedDocument = None
+
+from embeddings import get_embeddings_manager
 
 logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Docling Service", version="1.0.0")
+app = FastAPI(title="Docling Service", version="2.0.0")
 
-# No persistent OCR reader needed for pytesseract
+# Initialize embeddings manager
+try:
+    logger.info("========== Initializing Embeddings Manager ==========")
+    embeddings_mgr = get_embeddings_manager()
+    logger.info("✓ Embeddings manager initialized")
+    logger.info("Ensuring 'pdf_chunks' collection exists...")
+    embeddings_mgr.ensure_collection('pdf_chunks')
+    logger.info("✓ pdf_chunks collection ensured")
+    logger.info("========== Embeddings System Ready ==========")
+except Exception as e:
+    logger.error(f"✗ Failed to initialize embeddings manager: {str(e)}", exc_info=True)
+    logger.warning("Continuing without vector support.")
+    embeddings_mgr = None
 
 
 @app.get('/health')
 async def health_check():
-    return {"status": "ok", "service": "docling"}
+    """Health check endpoint"""
+    docling_available = DocumentConverter is not None
+    return {
+        "status": "ok",
+        "service": "docling",
+        "version": "2.0.0",
+        "docling_available": docling_available,
+    }
 
 
 @app.get('/info')
 async def info():
-    return {"service": "docling", "version": "1.0.0", "capabilities": ["pdf_to_markdown", "text_extraction", "ocr"]}
+    """Service information"""
+    return {
+        "service": "docling",
+        "version": "2.0.0",
+        "capabilities": [
+            "pdf_to_markdown",
+            "image_extraction",
+            "formula_extraction",
+            "table_detection",
+            "latex_preservation",
+            "vector_embeddings"
+        ]
+    }
 
 
 async def _save_tmp(file: UploadFile) -> str:
+    """Save uploaded file to temporary location"""
     suffix = os.path.splitext(file.filename)[1] or '.bin'
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
         contents = await file.read()
@@ -35,116 +82,147 @@ async def _save_tmp(file: UploadFile) -> str:
         return f.name
 
 
-def _extract_text_from_pdf(filepath: str):
-    """Extract text from PDF and return (text, page_count, method)"""
+def _extract_formulas_and_images(doc: ConvertedDocument) -> Dict[str, Any]:
+    """
+    Extract mathematical formulas and images from document.
+    
+    Returns:
+        Dictionary with formulas and image metadata
+    """
+    formulas = []
+    images = []
+    
     try:
-        logger.info(f"Opening PDF file: {filepath}")
-        with open(filepath, 'rb') as f:
-            pdf_reader = PyPDF2.PdfReader(f)
-            page_count = len(pdf_reader.pages)
-            logger.info(f"PDF has {page_count} pages")
-            text_parts = []
-            
-            for page_num, page in enumerate(pdf_reader.pages, 1):
-                try:
-                    text = page.extract_text()
-                    if text and text.strip():
-                        # Format as markdown with page headers
-                        text_parts.append(f"## Page {page_num}\n\n{text}\n")
-                except Exception as e:
-                    logger.warning(f"Failed to extract text from page {page_num}: {str(e)}")
-                    continue
-            
-            full_text = "".join(text_parts)
-            if full_text.strip():
-                logger.info(f"Extracted {len(full_text)} characters via PyPDF2 from {page_count} pages")
-                return full_text, page_count, "text-extraction"
-            else:
-                logger.warning("No text found via PyPDF2, will try OCR fallback")
-                return None, page_count, None
+        # Extract from document structure
+        if hasattr(doc, 'document') and hasattr(doc.document, 'blocks'):
+            for block_idx, block in enumerate(doc.document.blocks):
+                # Extract formulas (usually in MathBlock or similar)
+                if hasattr(block, 'children'):
+                    for child in block.children:
+                        if hasattr(child, 'type') and 'math' in str(child.type).lower():
+                            formula_data = {
+                                'block_index': block_idx,
+                                'latex': str(child) if hasattr(child, 'to_latex') else str(child),
+                                'type': 'inline' if 'inline' in str(child.type).lower() else 'display'
+                            }
+                            formulas.append(formula_data)
+                
+                # Extract images (usually in ImageBlock or similar)
+                if hasattr(block, 'type') and 'image' in str(block.type).lower():
+                    image_data = {
+                        'block_index': block_idx,
+                        'description': getattr(block, 'alt_text', 'Image'),
+                        'caption': getattr(block, 'caption', ''),
+                        'id': f"img_{block_idx}"
+                    }
+                    images.append(image_data)
+    
     except Exception as e:
-        logger.error(f"PDF extraction error: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None, None, None
+        logger.warning(f"Error extracting formulas/images: {str(e)}")
+    
+    return {
+        'formulas': formulas,
+        'images': images,
+    }
 
 
-def _extract_text_via_ocr(filepath: str):
-    """Extract text from PDF using OCR (image-based PDFs)"""
+def _convert_document_with_docling(filepath: str) -> Dict[str, Any]:
+    """
+    Convert document using Docling library.
+    Extracts text, formulas, images, tables, and metadata.
+    
+    Args:
+        filepath: Path to PDF file
+        
+    Returns:
+        Dictionary with extracted content
+    """
+    if DocumentConverter is None:
+        raise Exception("Docling library not available. Install with: pip install docling")
+    
     try:
-        logger.info("Converting PDF to images for OCR...")
-        images = convert_from_path(filepath, first_page=1, last_page=10)  # Limit to first 10 pages for speed
-        logger.info(f"Converted to {len(images)} images")
+        logger.info(f"Converting document with Docling: {filepath}")
         
-        text_parts = []
-
-        for page_num, image in enumerate(images, 1):
-            logger.info(f"Running OCR on page {page_num}...")
-            try:
-                # pdf2image returns PIL Images; use pytesseract to extract text
-                page_text = pytesseract.image_to_string(image, lang='eng')
-            except Exception:
-                page_text = ''
-
-            if page_text and page_text.strip():
-                text_parts.append(f"## Page {page_num} (OCR)\n\n{page_text}\n")
+        # Initialize converter
+        converter = DocumentConverter()
         
-        full_text = "".join(text_parts)
-        logger.info(f"Extracted {len(full_text)} characters via OCR from {len(images)} pages")
-        return full_text, (len(images) if full_text.strip() else None)
+        # Convert document
+        doc = converter.convert(filepath)
+        
+        logger.info(f"Document converted successfully")
+        
+        # Extract markdown (preserves structure)
+        markdown_content = doc.document.export_to_markdown() if hasattr(doc.document, 'export_to_markdown') else str(doc.document)
+        
+        # Extract formulas and images
+        formula_image_data = _extract_formulas_and_images(doc)
+        
+        # Get page count
+        page_count = len(doc.pages) if hasattr(doc, 'pages') else 1
+        
+        # Get metadata
+        metadata = {
+            'title': getattr(doc.document, 'title', 'Document'),
+            'author': getattr(doc.document, 'author', None),
+            'creation_date': getattr(doc.document, 'creation_date', None),
+            'page_count': page_count,
+        }
+        
+        return {
+            'status': 'success',
+            'markdown': markdown_content,
+            'char_count': len(markdown_content),
+            'page_count': page_count,
+            'metadata': metadata,
+            'formulas': formula_image_data['formulas'],
+            'images': formula_image_data['images'],
+            'extraction_method': 'docling'
+        }
+    
     except Exception as e:
-        logger.error(f"OCR extraction error: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None, None
+        logger.error(f"Docling conversion error: {str(e)}")
+        raise
 
 
 @app.post('/convert-pdf')
 async def convert_pdf(file: UploadFile = File(...)):
+    """
+    Convert PDF to structured markdown format.
+    Includes formula extraction (LaTeX) and image detection.
+    """
     tmp = None
     try:
-        logger.info(f"Received file: {file.filename} (size: {file.size} bytes)")
+        logger.info(f"Received file: {file.filename}")
         tmp = await _save_tmp(file)
-        logger.info(f"Saved to temp file: {tmp}")
-        logger.info(f"Converting PDF: {file.filename}")
         
-        # Try text extraction first
-        text, page_count, method = _extract_text_from_pdf(tmp)
+        # Convert using Docling
+        result = _convert_document_with_docling(tmp)
         
-        # If no text, try OCR
-        if not text:
-            logger.info("Text extraction failed, trying OCR...")
-            text, page_count = _extract_text_via_ocr(tmp)
-            method = "ocr"
+        # Format response
+        markdown = f"# {file.filename}\n\n{result['markdown']}"
         
-        if not text:
-            # If still no text found, return error
-            logger.warning(f"Could not extract text from PDF: {file.filename}")
-            return JSONResponse({
-                "status": "error",
-                "filename": file.filename,
-                "error": "Could not extract text. PDF may be corrupted or unreadable.",
-                "page_count": page_count,
-            }, status_code=400)
-        
-        # Format as markdown
-        md = f"# {file.filename}\n\n{text}"
-        
-        logger.info(f"Successfully converted {file.filename} ({page_count} pages, {len(md)} chars, method: {method})")
         return JSONResponse({
             "status": "success",
             "filename": file.filename,
-            "markdown": md,
-            "char_count": len(md),
-            "page_count": page_count,
-            "extraction_method": method,
+            "markdown": markdown,
+            "char_count": len(markdown),
+            "page_count": result['page_count'],
+            "extraction_method": result['extraction_method'],
+            "metadata": result['metadata'],
+            "formulas_found": len(result['formulas']),
+            "images_found": len(result['images']),
+            "formulas": result['formulas'][:10] if result['formulas'] else [],
+            "images_metadata": result['images'],
         })
+    
     except Exception as e:
         logger.error(f"Error converting PDF: {str(e)}")
-        logger.error(traceback.format_exc())
         return JSONResponse({
             "status": "error",
             "filename": file.filename,
             "error": str(e),
         }, status_code=500)
+    
     finally:
         if tmp and os.path.exists(tmp):
             try:
@@ -154,18 +232,158 @@ async def convert_pdf(file: UploadFile = File(...)):
                 logger.warning(f"Failed to delete temp file: {str(e)}")
 
 
-if __name__ == '__main__':
-    import uvicorn
-    port = int(os.getenv('PORT', 5000))
-    uvicorn.run(app, host='0.0.0.0', port=port)
+@app.post('/embed-pdf')
+async def embed_pdf(file: UploadFile = File(...), course_id: str = Query(None)):
+    """
+    Convert PDF to embeddings and store in Qdrant vector database.
+    Includes formula and image context.
+    """
+    if not course_id:
+        return JSONResponse({
+            "status": "error",
+            "error": "course_id is required as a query parameter"
+        }, status_code=400)
+    
+    tmp = None
+    try:
+        logger.info(f"Received file for embedding: {file.filename} (course: {course_id})")
+        tmp = await _save_tmp(file)
+        
+        # Convert using Docling
+        result = _convert_document_with_docling(tmp)
+        
+        # Prepare text for embedding (combine markdown + formula context)
+        text_content = result['markdown']
+        
+        # Add formula descriptions to text for better semantic search
+        if result['formulas']:
+            formula_text = "\n\n### Formulas Found:\n"
+            for i, formula in enumerate(result['formulas']):
+                formula_text += f"- Formula {i+1}: {formula.get('latex', 'Unknown')}\n"
+            text_content = text_content + formula_text
+        
+        # Add image descriptions
+        if result['images']:
+            image_text = "\n\n### Images Referenced:\n"
+            for img in result['images']:
+                image_text += f"- {img.get('description', 'Image')}"
+                if img.get('caption'):
+                    image_text += f": {img['caption']}"
+                image_text += "\n"
+            text_content = text_content + image_text
+        
+        # Store embeddings in Qdrant
+        try:
+            embedding_result = embeddings_mgr.store_pdf_chunks(text_content, course_id)
+            
+            logger.info(f"Successfully embedded PDF {file.filename} for course {course_id}")
+            return JSONResponse({
+                "status": "success",
+                "filename": file.filename,
+                "course_id": course_id,
+                "page_count": result['page_count'],
+                "extraction_method": result['extraction_method'],
+                "formulas_found": len(result['formulas']),
+                "images_found": len(result['images']),
+                "embedding_stats": embedding_result,
+                "metadata": result['metadata'],
+            })
+        
+        except Exception as e:
+            logger.error(f"Failed to store embeddings: {str(e)}")
+            return JSONResponse({
+                "status": "error",
+                "filename": file.filename,
+                "error": f"Embedding storage failed: {str(e)}"
+            }, status_code=500)
+    
+    except Exception as e:
+        logger.error(f"Error in embed_pdf: {str(e)}")
+        return JSONResponse({
+            "status": "error",
+            "filename": file.filename,
+            "error": str(e)
+        }, status_code=500)
+    
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp file: {str(e)}")
 
 
+@app.post('/extract-formulas')
+async def extract_formulas(file: UploadFile = File(...)):
+    """
+    Extract only mathematical formulas from PDF.
+    Returns LaTeX representation and locations.
+    """
+    tmp = None
+    try:
+        logger.info(f"Extracting formulas from: {file.filename}")
+        tmp = await _save_tmp(file)
+        
+        result = _convert_document_with_docling(tmp)
+        
+        return JSONResponse({
+            "status": "success",
+            "filename": file.filename,
+            "formulas_count": len(result['formulas']),
+            "formulas": result['formulas'],
+            "page_count": result['page_count'],
+        })
+    
+    except Exception as e:
+        logger.error(f"Error extracting formulas: {str(e)}")
+        return JSONResponse({
+            "status": "error",
+            "filename": file.filename,
+            "error": str(e)
+        }, status_code=500)
+    
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp file: {str(e)}")
 
-if __name__ == '__main__':
-    import uvicorn
-    port = int(os.getenv('PORT', 5000))
-    uvicorn.run(app, host='0.0.0.0', port=port)
 
+@app.post('/extract-images')
+async def extract_images(file: UploadFile = File(...)):
+    """
+    Extract image metadata and descriptions from PDF.
+    """
+    tmp = None
+    try:
+        logger.info(f"Extracting images from: {file.filename}")
+        tmp = await _save_tmp(file)
+        
+        result = _convert_document_with_docling(tmp)
+        
+        return JSONResponse({
+            "status": "success",
+            "filename": file.filename,
+            "images_count": len(result['images']),
+            "images": result['images'],
+            "page_count": result['page_count'],
+        })
+    
+    except Exception as e:
+        logger.error(f"Error extracting images: {str(e)}")
+        return JSONResponse({
+            "status": "error",
+            "filename": file.filename,
+            "error": str(e)
+        }, status_code=500)
+    
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp file: {str(e)}")
 
 
 if __name__ == '__main__':

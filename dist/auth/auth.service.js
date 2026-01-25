@@ -83,9 +83,12 @@ let AuthService = class AuthService {
             };
             const token = jwt.sign(payload, this.jwtSecret, { expiresIn: 604800 });
             return {
-                reply: 'Success',
-                token: 'Bearer ' + token,
-                user: payload
+                success: true,
+                message: 'Registration successful',
+                data: {
+                    token: token,
+                    user: payload
+                }
             };
         }
         catch (error) {
@@ -118,9 +121,12 @@ let AuthService = class AuthService {
         };
         const token = jwt.sign(payload, this.jwtSecret, { expiresIn: 604800 });
         return {
-            reply: 'Success',
-            token: 'Bearer ' + token,
-            user: payload
+            success: true,
+            message: 'Login successful',
+            data: {
+                token: token,
+                user: payload
+            }
         };
     }
     async findOrCreateGoogleUser(profile) {
@@ -164,9 +170,12 @@ let AuthService = class AuthService {
             };
             const token = jwt.sign(payload, this.jwtSecret, { expiresIn: 604800 });
             return {
-                reply: 'Success',
-                token: 'Bearer ' + token,
-                user: payload
+                success: true,
+                message: 'Google authentication successful',
+                data: {
+                    token: token,
+                    user: payload
+                }
             };
         }
         catch (error) {

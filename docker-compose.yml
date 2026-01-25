@@ -5,52 +5,68 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    command: 
+      - "--logpath=/dev/null"
+      - "--quiet"
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
     restart: unless-stopped
 
-  docling:
-    build:
-      context: ./docling-service
+  qdrant:
+    image: qdrant/qdrant:latest
     ports:
-      - "5000:5000"
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
     environment:
-      HOST: 0.0.0.0
-      PORT: 5000
-      LOG_LEVEL: INFO
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      QDRANT_API_KEY: qdrant_key_secret
     restart: unless-stopped
+
+  # docling service commented out for now - using fallback PDF chunking in Node.js
+  # docling:
+  #   build:
+  #     context: ./docling-service
+  #   ports:
+  #     - "5000:5000"
+  #   environment:
+  #     HOST: 0.0.0.0
+  #     PORT: 5000
+  #     LOG_LEVEL: WARNING
+  #     QDRANT_URL: http://qdrant:6333
+  #   depends_on:
+  #     - qdrant
+  #   restart: unless-stopped
 
   sage-be:
     build:
       context: .
     ports:
       - "4000:4000"
+    env_file: .env
     environment:
       NODE_ENV: production
       PORT: 4000
       mongoURI: mongodb://mongo:27017/SAGE
       DOCLING_SERVICE_URL: http://docling:5000
       REDIS_URL: redis://redis:6379
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: qdrant_key_secret
+      NODE_OPTIONS: "--max-old-space-size=2048"
     depends_on:
-      docling:
-        condition: service_healthy
-      mongo:
-        condition: service_started
+      - mongo
+      - qdrant
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2.5G
+        reservations:
+          memory: 2G
 
 volumes:
   mongo_data:
+  qdrant_data:

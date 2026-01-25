@@ -37,7 +37,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 require("reflect-metadata");
 const core_1 = require("@nestjs/core");
 const common_1 = require("@nestjs/common");
-const app_response_interceptor_1 = require("./common/interceptors/app-response.interceptor");
 const dotenv = __importStar(require("dotenv"));
 const app_module_1 = require("./app.module");
 const swagger_1 = require("@nestjs/swagger");
@@ -50,34 +49,22 @@ async function bootstrap() {
         logger.log('Created uploads directory');
     }
     const app = await core_1.NestFactory.create(app_module_1.AppModule);
+    // Configure payload size limits for file uploads
+    app.use(require('express').json({ limit: '50mb' }));
+    app.use(require('express').urlencoded({ limit: '50mb', extended: true }));
     app.useGlobalPipes(new common_1.ValidationPipe({
         whitelist: true,
         transform: true,
         forbidNonWhitelisted: true,
     }));
     app.enableCors({
-        origin: (origin, callback) => {
-            const allowedOrigins = [
-                process.env.FRONTEND_URL || 'http://localhost:3000',
-                'http://localhost:3000',
-                'http://localhost:4000',
-                'http://127.0.0.1:3000',
-                'http://127.0.0.1:4000',
-            ];
-            // Allow requests without origin (like Postman or curl)
-            if (!origin || allowedOrigins.includes(origin)) {
-                callback(null, true);
-            }
-            else {
-                callback(new Error('Not allowed by CORS'));
-            }
-        },
+        origin: true, // Allow all origins in development
         methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
         credentials: true,
         allowedHeaders: 'Content-Type,Authorization,X-Requested-With',
     });
     const config = new swagger_1.DocumentBuilder()
-        .setTitle('Studygai EdTech API')
+        .setTitle('StudyGAI EdTech API')
         .setDescription('AI-Powered Study Assistant API with PDF processing and chat capabilities')
         .setVersion('1.0')
         .addBearerAuth({
@@ -90,14 +77,12 @@ async function bootstrap() {
         .build();
     const document = swagger_1.SwaggerModule.createDocument(app, config);
     swagger_1.SwaggerModule.setup('/docs', app, document, {
-        customSiteTitle: 'SAGE API Documentation',
+        customSiteTitle: 'StudyGAI API Documentation',
         swaggerOptions: {
             persistAuthorization: true,
         },
     });
     logger.log('Swagger UI available at /docs');
-    // Register global response interceptor to enforce IAppResponse shape
-    app.useGlobalInterceptors(new app_response_interceptor_1.AppResponseInterceptor());
     const port = process.env.PORT || 4000;
     await app.listen(port);
     logger.log(`SAGE Backend running on http://localhost:${port}`);

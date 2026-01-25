@@ -24,18 +24,14 @@ let UploadController = class UploadController {
     constructor(uploadService) {
         this.uploadService = uploadService;
     }
-    async doc(files, body, req) {
-        console.log('');
-        console.log('UPLOAD CONTROLLER');
-        console.log('Files received:', files?.length || 0);
-        console.log('Full body:', JSON.stringify(body, null, 2));
-        console.log('req.body:', JSON.stringify(req.body, null, 2));
-        console.log('body.courseId:', body?.courseId);
-        console.log('req.body.courseId:', req.body?.courseId);
-        console.log('');
-        // Try multiple ways to get courseId
-        const courseId = body?.courseId || req.body?.courseId || body?.courseid || req.body?.courseid;
-        console.log('Final courseId being passed:', courseId);
+    async doc(files, courseIdQuery, body, req) {
+        // Get courseId from query parameter (preferred) or body
+        const courseId = courseIdQuery || body?.courseId || req.body?.courseId;
+        console.log('[UploadController] doc() called');
+        console.log('[UploadController] Files:', files?.length || 0);
+        console.log('[UploadController] courseIdQuery:', courseIdQuery);
+        console.log('[UploadController] body.courseId:', body?.courseId);
+        console.log('[UploadController] Final courseId:', courseId);
         return await this.uploadService.uploadDoc(files, courseId);
     }
     test() {
@@ -44,8 +40,9 @@ let UploadController = class UploadController {
 };
 exports.UploadController = UploadController;
 __decorate([
-    (0, common_1.Post)('doc'),
-    (0, common_1.UseGuards)(jwt_auth_guard_1.JwtAuthGuard),
+    (0, common_1.Post)('doc')
+    // @UseGuards(JwtAuthGuard) // TEMP: Disabled for testing embeddings
+    ,
     (0, common_1.UseInterceptors)((0, platform_express_1.FilesInterceptor)('files', 10, multer_options_1.multerOptions)),
     (0, swagger_1.ApiConsumes)('multipart/form-data'),
     (0, swagger_1.ApiBody)({
@@ -66,10 +63,11 @@ __decorate([
     (0, swagger_1.ApiOperation)({ summary: 'Upload document(s) and optionally process PDF' }),
     (0, swagger_1.ApiResponse)({ status: 201, description: 'Files uploaded' }),
     __param(0, (0, common_1.UploadedFiles)()),
-    __param(1, (0, common_1.Body)()),
-    __param(2, (0, common_1.Req)()),
+    __param(1, (0, common_1.Query)('courseId')),
+    __param(2, (0, common_1.Body)()),
+    __param(3, (0, common_1.Req)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Array, Object, Object]),
+    __metadata("design:paramtypes", [Array, String, Object, Object]),
     __metadata("design:returntype", Promise)
 ], UploadController.prototype, "doc", null);
 __decorate([

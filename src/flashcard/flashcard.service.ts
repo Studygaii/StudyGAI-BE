@@ -5,12 +5,14 @@ import { CreateFlashcardDto, ReviewFlashcardDto } from './dto/create-flashcard.d
 import { default as mongoose } from 'mongoose';
 import { CourseDocument } from '../schemas/course.schema';
 import { GroqService } from '../common/groq.service';
+import { QdrantService } from '../qdrant/qdrant.service';
 
 @Injectable()
 export class FlashcardService {
   constructor(
     @InjectModel('courses') private courseModel: Model<CourseDocument>, // operate on courses
     private groqService: GroqService, // inject Groq service
+    private qdrantService: QdrantService, // inject Qdrant service for vector search
   ) {}
 
   // Add flashcards to a course (bulk create)
@@ -220,7 +222,7 @@ export class FlashcardService {
 
   /**
    * Generate flashcards from course PDF using Groq AI
-   * Called when user requests "@SAGE make flashcards on Chapter X"
+   * Called when user requests "@studyGAI make flashcards on Chapter X"
    */
   async generateFromPDF(courseId: string, userId: string, topic?: string) {
     try {

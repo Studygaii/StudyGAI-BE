@@ -19,9 +19,6 @@ let GroqService = class GroqService {
         // Use updated model from env or default to llama-3.3-70b-versatile
         this.modelName = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
     }
-    /**
-     * Standard chat completion without PDF context
-     */
     async getGroqChatCompletion(messages) {
         try {
             return await this.groq.chat.completions.create({
@@ -41,9 +38,6 @@ let GroqService = class GroqService {
             throw err;
         }
     }
-    /**
-     * Chat completion WITH PDF context for study chatbot
-     */
     async chatWithPDF(pdfContent, messages) {
         try {
             // Keep PDF context small to avoid hitting Groq token limits.
@@ -122,9 +116,6 @@ Instructions:
             throw err;
         }
     }
-    /**
-     * Streaming chat completion (for real-time responses)
-     */
     async getGroqChatCompletionStream(messages) {
         try {
             return await this.groq.chat.completions.create({
@@ -143,9 +134,6 @@ Instructions:
             throw err;
         }
     }
-    /**
-     * Streaming chat WITH PDF context
-     */
     async chatWithPDFStream(pdfContent, messages) {
         try {
             const maxPdfChars = 400000;
@@ -182,9 +170,6 @@ Instructions:
             throw err;
         }
     }
-    /**
-     * Generate flashcards from PDF content using Groq AI
-     */
     async generateFlashcardsFromPDF(pdfContent, courseTitle) {
         try {
             const maxPdfChars = 400000;
@@ -290,9 +275,6 @@ IMPORTANT: Return ONLY valid JSON in this exact format, no markdown, no code blo
             throw err;
         }
     }
-    /**
-     * Test connection to Groq API
-     */
     async testConnection() {
         try {
             const response = await this.groq.chat.completions.create({
@@ -307,9 +289,6 @@ IMPORTANT: Return ONLY valid JSON in this exact format, no markdown, no code blo
             return false;
         }
     }
-    /**
-     * Get current model name being used
-     */
     getModelName() {
         return this.modelName;
     }

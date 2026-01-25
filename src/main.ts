@@ -18,6 +18,10 @@ async function bootstrap() {
   
   const app = await NestFactory.create(AppModule);
   
+  // Configure payload size limits for file uploads
+  app.use(require('express').json({ limit: '50mb' }));
+  app.use(require('express').urlencoded({ limit: '50mb', extended: true }));
+  
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -27,29 +31,14 @@ async function bootstrap() {
   );
 
   app.enableCors({
-    origin: (origin, callback) => {
-      const allowedOrigins = [
-        process.env.FRONTEND_URL || 'http://localhost:3000',
-        'http://localhost:3000',
-        'http://localhost:4000',
-        'http://127.0.0.1:3000',
-        'http://127.0.0.1:4000',
-      ];
-      
-      // Allow requests without origin (like Postman or curl)
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
+    origin: true, // Allow all origins in development
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
     allowedHeaders: 'Content-Type,Authorization,X-Requested-With',
   });
 
   const config = new DocumentBuilder()
-    .setTitle('Studygai EdTech API')
+    .setTitle('StudyGAI EdTech API')
     .setDescription(
       'AI-Powered Study Assistant API with PDF processing and chat capabilities',
     )
@@ -69,7 +58,7 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
 
   SwaggerModule.setup('/docs', app, document, {
-    customSiteTitle: 'SAGE API Documentation',
+    customSiteTitle: 'StudyGAI API Documentation',
     swaggerOptions: {
       persistAuthorization: true,
     },

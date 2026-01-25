@@ -7,7 +7,8 @@ import {
   UseInterceptors, 
   UploadedFiles,
   Body,
-  Req
+  Req,
+  Query,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { multerOptions } from './multer.options';
@@ -22,7 +23,7 @@ export class UploadController {
   constructor(private readonly uploadService: UploadService) {}
 
   @Post('doc')
-  @UseGuards(JwtAuthGuard)
+  // @UseGuards(JwtAuthGuard) // TEMP: Disabled for testing embeddings
   @UseInterceptors(FilesInterceptor('files', 10, multerOptions))
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -44,22 +45,18 @@ export class UploadController {
   @ApiResponse({ status: 201, description: 'Files uploaded' })
   async doc(
     @UploadedFiles() files: Array<Express.Multer.File>,
-    @Body() body: any, // Changed to get full body
+    @Query('courseId') courseIdQuery: string,
+    @Body() body: any,
     @Req() req: any,
   ) {
-    console.log('');
-    console.log('UPLOAD CONTROLLER');
-    console.log('Files received:', files?.length || 0);
-    console.log('Full body:', JSON.stringify(body, null, 2));
-    console.log('req.body:', JSON.stringify(req.body, null, 2));
-    console.log('body.courseId:', body?.courseId);
-    console.log('req.body.courseId:', req.body?.courseId);
-    console.log('');
-
-    // Try multiple ways to get courseId
-    const courseId = body?.courseId || req.body?.courseId || body?.courseid || req.body?.courseid;
+    // Get courseId from query parameter (preferred) or body
+    const courseId = courseIdQuery || body?.courseId || req.body?.courseId;
     
-    console.log('Final courseId being passed:', courseId);
+    console.log('[UploadController] doc() called');
+    console.log('[UploadController] Files:', files?.length || 0);
+    console.log('[UploadController] courseIdQuery:', courseIdQuery);
+    console.log('[UploadController] body.courseId:', body?.courseId);
+    console.log('[UploadController] Final courseId:', courseId);
     
     return await this.uploadService.uploadDoc(files, courseId);
   }

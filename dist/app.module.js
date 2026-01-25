@@ -25,6 +25,8 @@ const groupchat_schema_1 = require("./schemas/groupchat.schema");
 const quiz_schema_1 = require("./schemas/quiz.schema");
 const quiz_module_1 = require("./quiz/quiz.module");
 const cache_module_1 = require("./cache/cache.module");
+const qdrant_module_1 = require("./qdrant/qdrant.module");
+const embeddings_module_1 = require("./embeddings/embeddings.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
@@ -33,6 +35,7 @@ exports.AppModule = AppModule = __decorate([
         imports: [
             config_1.ConfigModule.forRoot({ isGlobal: true }),
             cache_module_1.CacheModule,
+            embeddings_module_1.EmbeddingsModule,
             mongoose_1.MongooseModule.forRoot(process.env.mongoURI || process.env.localURI || ''),
             mongoose_1.MongooseModule.forFeature([
                 { name: 'users', schema: user_schema_1.UserSchema },
@@ -49,6 +52,7 @@ exports.AppModule = AppModule = __decorate([
             pdf_module_1.PdfModule,
             flashcard_module_1.FlashcardModule,
             quiz_module_1.QuizModule,
+            qdrant_module_1.QdrantModule,
         ],
         controllers: [app_controller_1.AppController],
     })

@@ -12,7 +12,7 @@
 
 ## AI-Powered Flashcard Generation
 
-### Flow: "@SAGE make flashcards on Chapter X"
+### Flow: "@studyGAI make flashcards on Chapter X"
 
 1. **User uploads PDF** → `POST /api/v1/upload/doc` with courseId
    - UploadService detects PDF and calls PdfService.processPdfForCourse()

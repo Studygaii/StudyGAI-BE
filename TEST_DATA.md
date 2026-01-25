@@ -669,7 +669,7 @@ There are **two different endpoints** with different request formats:
 | **Method** | **Endpoint** | **Request Body** | **Use Case** |
 |-----------|------------|-----------------|-----------|
 | **Manual** | `POST /api/v1/flashcards/create` | Full card details (front, back, tags, etc.) | Student manually types flashcards |
-| **AI** | `POST /api/v1/flashcards/:courseId/generate-from-pdf` | Optional topic only | "@SAGE make flashcards on Chapter X" |
+| **AI** | `POST /api/v1/flashcards/:courseId/generate-from-pdf` | Optional topic only | "@studyGAI make flashcards on Chapter X" |
 
 ---
 

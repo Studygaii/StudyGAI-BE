@@ -22,11 +22,23 @@ let CourseService = class CourseService {
         this.courseModel = courseModel;
     }
     async list(userId) {
-        const courses = await this.courseModel
-            .find({ creator: userId })
-            .populate('chats')
-            .sort({ createdAt: -1 });
-        return { message: 'success', courses };
+        try {
+            const courses = await this.courseModel
+                .find({ creator: userId })
+                .populate('chats')
+                .sort({ createdAt: -1 });
+            return {
+                success: true,
+                message: 'Courses retrieved successfully',
+                data: { courses },
+            };
+        }
+        catch (error) {
+            return {
+                success: false,
+                message: `Failed to retrieve courses: ${error.message}`,
+            };
+        }
     }
     async create(body, authenticatedUserId) {
         const newCourse = new this.courseModel({
@@ -47,23 +59,49 @@ let CourseService = class CourseService {
         });
         try {
             const course = await newCourse.save();
-            return { message: 'success', course };
+            return {
+                success: true,
+                message: 'Course created successfully',
+                data: { course },
+            };
         }
         catch (error) {
             if (error.code === 11000 && error.keyPattern?.title) {
-                return { status: 400, error: 'Course title already exists' };
+                return {
+                    success: false,
+                    message: 'Course title already exists',
+                };
             }
-            return { status: 500, error: error.message || 'Failed to create course' };
+            return {
+                success: false,
+                message: error.message || 'Failed to create course',
+            };
         }
     }
     async remove(id, userId) {
-        const result = await this.courseModel.findOneAndDelete({
-            _id: id,
-            creator: userId,
-        });
-        return result
-            ? { message: 'success', id }
-            : { status: 404, error: 'Course not found' };
+        try {
+            const result = await this.courseModel.findOneAndDelete({
+                _id: id,
+                creator: userId,
+            });
+            if (!result) {
+                return {
+                    success: false,
+                    message: 'Course not found',
+                };
+            }
+            return {
+                success: true,
+                message: 'Course deleted successfully',
+                data: { id },
+            };
+        }
+        catch (error) {
+            return {
+                success: false,
+                message: `Failed to delete course: ${error.message}`,
+            };
+        }
     }
 };
 exports.CourseService = CourseService;
