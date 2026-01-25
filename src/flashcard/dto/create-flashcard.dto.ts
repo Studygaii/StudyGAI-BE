@@ -106,7 +106,7 @@ export class CreateFlashcardDto {
  * DTO for AI-GENERATED flashcards from PDF
  * User only specifies optional topic; AI creates all card details
  *
- * Example use case: "@SAGE make flashcards on Chapter 3"
+ * Example use case: "@studyGAI make flashcards on Chapter 3"
  * Request body is minimal: just optional topic
  * AI generates front/back/tags automatically
  */

@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import { CourseDocument } from '../schemas/course.schema';
 import { basename } from 'path';
 import { DoclingService } from '../docling/docling.service';
+import { QdrantService } from '../qdrant/qdrant.service';
 import { CacheService } from '../cache/cache.service';
 
 // Import pdf-parse as fallback
@@ -115,7 +116,6 @@ export class PdfService {
     }
   }
 
-// src/pdf/pdf.service.ts
 async savePdfContent(
   courseId: string,
   pdfText: string,
@@ -358,5 +358,23 @@ async savePdfContent(
     } catch (error) {
       return { status: 500, error: error.message };
     }
+  }
+  /**
+   * Chunk PDF text and store in Qdrant (fallback if Docling service fails)
+   */
+  async chunkAndEmbedPdf(
+    courseId: string,
+    pdfText: string,
+    chunkSize: number = 512,
+    overlap: number = 100,
+    qdrantService?: any,
+  ): Promise<{ status: number; message: string; chunked?: number; stored?: number; error?: string }> {
+    this.logger.warn('[chunkAndEmbedPdf] DEPRECATED: This method uses the disabled NestJS embeddings service');
+    this.logger.warn('[chunkAndEmbedPdf] Use Python Docling microservice instead (POST /embed-pdf)');
+    return {
+      status: 410, // 410 Gone - permanently unavailable
+      message: 'chunkAndEmbedPdf is deprecated',
+      error: 'Use Python Docling microservice POST /embed-pdf endpoint for embedding functionality',
+    };
   }
 }

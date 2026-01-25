@@ -16,6 +16,7 @@ import { GroupChatSchema } from './schemas/groupchat.schema';
 import { QuizSchema } from './schemas/quiz.schema';
 import { QuizModule } from './quiz/quiz.module';
 import { CacheModule } from './cache/cache.module';
+import { QdrantModule } from './qdrant/qdrant.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { CacheModule } from './cache/cache.module';
     PdfModule,
     FlashcardModule,
     QuizModule,
+    QdrantModule,
   ],
   controllers: [AppController],
 })

@@ -22,14 +22,16 @@ const mongoose_1 = require("@nestjs/mongoose");
 const mongoose_2 = require("mongoose");
 const groq_service_1 = require("../common/groq.service");
 const pdf_service_1 = require("../pdf/pdf.service");
+const qdrant_service_1 = require("../qdrant/qdrant.service");
 const mongoose_3 = __importDefault(require("mongoose"));
 let ChatService = class ChatService {
     constructor(chatModel, courseModel, // typed course model
-    groq, pdfService) {
+    groq, pdfService, qdrantService) {
         this.chatModel = chatModel;
         this.courseModel = courseModel;
         this.groq = groq;
         this.pdfService = pdfService;
+        this.qdrantService = qdrantService;
     }
     async list(courseID, userID) {
         const chats = await this.chatModel
@@ -152,6 +154,97 @@ let ChatService = class ChatService {
             return { status: 500, error: error.message };
         }
     }
+    /**
+     * Check if a message contains @studyGAI mention
+     */
+    hasStudyGAIMention(content) {
+        return /@studyGAI/i.test(content);
+    }
+    /**
+     * Extract context from vector search when @studyGAI is mentioned
+     */
+    async getStudyGAIContext(message, courseId, limit = 3) {
+        try {
+            // Extract the actual query after @studyGAI
+            const queryMatch = message.match(/@studyGAI\s+(.+?)(?:\s*$|\s+@|\n)/i);
+            const query = queryMatch ? queryMatch[1].trim() : message.replace(/@studyGAI/i, '').trim();
+            if (!query) {
+                return ''; // No specific query
+            }
+            // Search for similar content in vector database
+            const results = await this.qdrantService.searchSimilarChunks(query, courseId, limit);
+            if (results.length === 0) {
+                return '';
+            }
+            // Format results as context
+            const contextLines = results.map((r, idx) => {
+                return `[Relevant Context ${idx + 1}]\n${r.text}`;
+            });
+            return `\n\n--- Context from course materials ---\n${contextLines.join('\n\n')}`;
+        }
+        catch (error) {
+            console.warn(`Failed to get @studyGAI context: ${error.message}`);
+            return '';
+        }
+    }
+    /**
+     * Send messages with @studyGAI context injection
+     */
+    async sendWithContext(messages, courseId) {
+        try {
+            if (!courseId || messages.length === 0) {
+                return this.send(messages, courseId);
+            }
+            // Get last user message
+            const lastMessage = messages[messages.length - 1];
+            const userContent = lastMessage?.content || '';
+            // Check for @studyGAI mention
+            if (this.hasStudyGAIMention(userContent)) {
+                const context = await this.getStudyGAIContext(userContent, courseId);
+                if (context) {
+                    // Inject context into the message
+                    messages[messages.length - 1] = {
+                        ...lastMessage,
+                        content: userContent + context,
+                    };
+                }
+            }
+            return this.send(messages, courseId);
+        }
+        catch (error) {
+            console.error('sendWithContext error:', error);
+            return this.send(messages, courseId);
+        }
+    }
+    /**
+     * Send messages with streaming and @studyGAI context
+     */
+    async sendStreamWithContext(messages, courseId) {
+        try {
+            if (!courseId || messages.length === 0) {
+                return this.sendStream(messages, courseId);
+            }
+            // Get last user message
+            const lastMessage = messages[messages.length - 1];
+            const userContent = lastMessage?.content || '';
+            // Check for @studyGAI mention
+            if (this.hasStudyGAIMention(userContent)) {
+                const context = await this.getStudyGAIContext(userContent, courseId);
+                if (context) {
+                    // Inject context into the message
+                    messages[messages.length - 1] = {
+                        ...lastMessage,
+                        content: userContent + context,
+                    };
+                }
+            }
+            return this.sendStream(messages, courseId);
+        }
+        catch (error) {
+            console.error('sendStreamWithContext error:', error);
+            return this.sendStream(messages, courseId);
+        }
+    }
 };
 exports.ChatService = ChatService;
 exports.ChatService = ChatService = __decorate([
@@ -161,6 +254,7 @@ exports.ChatService = ChatService = __decorate([
     __metadata("design:paramtypes", [mongoose_2.Model,
         mongoose_2.Model,
         groq_service_1.GroqService,
-        pdf_service_1.PdfService])
+        pdf_service_1.PdfService,
+        qdrant_service_1.QdrantService])
 ], ChatService);
 //# sourceMappingURL=chat.service.js.map

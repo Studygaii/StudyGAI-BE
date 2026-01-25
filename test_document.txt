@@ -1,0 +1,13 @@
+This is a test document for PDF chunking and embedding.
+
+The purpose of this document is to test the PDF processing pipeline:
+1. Extract text from PDF
+2. Split into chunks
+3. Generate embeddings for each chunk
+4. Store in Qdrant vector database
+5. Enable semantic search on the chunks
+
+This text should be sufficient to create multiple chunks when processed.
+Each chunk will be 512 characters with 100 character overlap.
+
+This is the end of the test document.

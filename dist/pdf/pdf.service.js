@@ -157,7 +157,6 @@ let PdfService = PdfService_1 = class PdfService {
             throw error;
         }
     }
-    // src/pdf/pdf.service.ts
     async savePdfContent(courseId, pdfText, options) {
         try {
             console.log('');
@@ -360,6 +359,99 @@ let PdfService = PdfService_1 = class PdfService {
         }
         catch (error) {
             return { status: 500, error: error.message };
+        }
+    }
+    /**
+     * Chunk PDF text and store in Qdrant (fallback if Docling service fails)
+     */
+    async chunkAndEmbedPdf(courseId, pdfText, chunkSize = 512, overlap = 100, qdrantService) {
+        try {
+            this.logger.log(`[chunkAndEmbedPdf] Starting for course: ${courseId}, text length: ${pdfText?.length || 0}`);
+            if (!pdfText || pdfText.trim().length === 0) {
+                this.logger.warn(`[chunkAndEmbedPdf] Empty PDF text provided`);
+                return { status: 400, message: 'Empty PDF text', error: 'No content to chunk' };
+            }
+            // Limit text to avoid memory issues - process in chunks
+            // This ensures we don't create thousands of chunk objects at once
+            const maxChunksPerBatch = 50;
+            const charLimitPerBatch = 25000; // Process 25KB at a time
+            // Determine how much text to process
+            let textToProcess = pdfText;
+            if (pdfText.length > charLimitPerBatch) {
+                textToProcess = pdfText.substring(0, charLimitPerBatch);
+                this.logger.log(`[chunkAndEmbedPdf] Processing first ${textToProcess.length} chars of ${pdfText.length} (batching)`);
+            }
+            // Split text into chunks with overlap
+            const chunks = [];
+            let start = 0;
+            while (start < textToProcess.length) {
+                const end = Math.min(start + chunkSize, textToProcess.length);
+                const chunk = textToProcess.substring(start, end).trim();
+                if (chunk.length > 0) {
+                    chunks.push(chunk);
+                }
+                // Move start position, accounting for overlap
+                start = end - overlap;
+                if (start <= 0) {
+                    break;
+                }
+                // Stop if we have too many chunks to avoid memory issues
+                if (chunks.length >= maxChunksPerBatch) {
+                    this.logger.log(`[chunkAndEmbedPdf] Reached batch limit of ${maxChunksPerBatch} chunks`);
+                    break;
+                }
+            }
+            this.logger.log(`[chunkAndEmbedPdf] Created ${chunks.length} chunks from PDF text`);
+            if (chunks.length === 0) {
+                this.logger.warn(`[chunkAndEmbedPdf] Could not create any chunks`);
+                return { status: 400, message: 'Could not create chunks', error: 'Text too short' };
+            }
+            // Store chunks in Qdrant with embeddings
+            try {
+                if (!qdrantService) {
+                    this.logger.warn(`[chunkAndEmbedPdf] No qdrantService provided, skipping storage`);
+                    return { status: 200, message: 'PDF chunked but not stored (no service)', chunked: chunks.length };
+                }
+                this.logger.log(`[chunkAndEmbedPdf] Calling storeChunksWithEmbeddings with ${chunks.length} chunks`);
+                const stats = await qdrantService.storeChunksWithEmbeddings(chunks, courseId, 'pdf_chunks');
+                this.logger.log(`[chunkAndEmbedPdf] Embedding stats: ${JSON.stringify(stats)}`);
+                if (stats.status === 'success' || stats.status === 'partial_success') {
+                    this.logger.log(`[chunkAndEmbedPdf] Successfully stored chunks - pointsStored: ${stats.pointsStored}`);
+                    return {
+                        status: 200,
+                        message: 'PDF chunked and stored successfully',
+                        chunked: chunks.length,
+                        stored: stats.pointsStored,
+                    };
+                }
+                else {
+                    this.logger.error(`[chunkAndEmbedPdf] Failed to generate embeddings: ${stats.status}`);
+                    return {
+                        status: 500,
+                        message: 'Failed to generate embeddings for chunks',
+                        chunked: chunks.length,
+                        stored: 0,
+                    };
+                }
+            }
+            catch (qdrantError) {
+                this.logger.error(`[chunkAndEmbedPdf] Qdrant error: ${qdrantError.message}`, qdrantError.stack);
+                return {
+                    status: 500,
+                    message: 'PDF chunked but failed to store in Qdrant',
+                    chunked: chunks.length,
+                    stored: 0,
+                    error: qdrantError.message,
+                };
+            }
+        }
+        catch (error) {
+            this.logger.error(`[chunkAndEmbedPdf] Unexpected error: ${error.message}`, error.stack);
+            return {
+                status: 500,
+                message: 'Failed to chunk and embed PDF',
+                error: error.message,
+            };
         }
     }
 };

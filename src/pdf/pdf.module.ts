@@ -5,11 +5,15 @@ import { PdfController } from './pdf.controller';
 import { PdfService } from './pdf.service';
 import { CourseSchema } from '../schemas/course.schema';
 import { DoclingModule } from '../docling/docling.module';
+import { QdrantModule } from '../qdrant/qdrant.module';
+import { CacheModule } from '../cache/cache.module';
 //import { CourseSchema } from '../courses/schemas/course.schema';
 
 @Module({
   imports: [
     DoclingModule,
+    QdrantModule,
+    CacheModule,
     MongooseModule.forFeature([
       { name: 'courses', schema: CourseSchema },
     ]),

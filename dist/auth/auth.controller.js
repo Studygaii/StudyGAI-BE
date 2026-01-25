@@ -25,7 +25,7 @@ let AuthController = class AuthController {
         this.authService = authService;
     }
     test() {
-        return { msg: 'Auth Works!' };
+        return { success: true, message: 'Auth works!', data: { message: 'Auth Works!' } };
     }
     async register(body, req) {
         return this.authService.register(body, req);
@@ -41,15 +41,15 @@ let AuthController = class AuthController {
     }
     async googleAuthRedirect(req, res) {
         const result = req.user;
-        const token = result?.token || '';
-        const user = result?.user || {};
+        const token = result?.data?.token || '';
+        const user = result?.data?.user || {};
         // Check if request is from browser or API client
         if (req.query.redirect === 'false' || req.headers['accept']?.includes('application/json')) {
             // Return JSON for API clients
             return res.json({
-                reply: 'Success',
-                token,
-                user,
+                success: true,
+                message: 'Google authentication successful',
+                data: { token, user },
             });
         }
         // Redirect to frontend with token in hash for browser-based flow
@@ -66,7 +66,7 @@ __decorate([
     (0, swagger_1.ApiResponse)({ status: 200, description: 'Authentication working' }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Object)
 ], AuthController.prototype, "test", null);
 __decorate([
     (0, common_1.Post)('register'),

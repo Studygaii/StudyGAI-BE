@@ -1,11 +1,20 @@
 // src/upload/upload.service.ts
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PdfService } from '../pdf/pdf.service';
+import { QdrantService } from '../qdrant/qdrant.service';
 import { IAppResponse } from '../interfaces/app-response.interface';
+import axios from 'axios';
 
 @Injectable()
 export class UploadService {
-  constructor(private pdfService: PdfService) {}
+  private readonly logger = new Logger(UploadService.name);
+
+  constructor(
+    private pdfService: PdfService,
+    private qdrantService: QdrantService,
+  ) {
+    this.logger.log('[UploadService] Initialized');
+  }
 
   async uploadDoc(files: Array<Express.Multer.File>, courseId?: string): Promise<IAppResponse<any>> {
     try {
@@ -65,7 +74,18 @@ export class UploadService {
               };
             }
 
-            console.log('File processing successful!');
+            this.logger.log('File processing successful! Now triggering PDF embedding...');
+            
+            // Trigger vector embedding to Qdrant (wait for it to complete)
+            try {
+              this.logger.log(`[uploadDoc] Calling triggerPDFEmbedding for course ${courseId}`);
+              const embeddingResult = await this.triggerPDFEmbedding(courseId, targetFile.path);
+              this.logger.log(`[uploadDoc] PDF embedding result: ${JSON.stringify(embeddingResult)}`);
+            } catch (error) {
+              this.logger.error(`[uploadDoc] Failed to trigger PDF embedding: ${error.message}`);
+              // Continue anyway - embedding failure shouldn't block the upload
+            }
+
             return {
               success: true,
               message: 'File uploaded and processed successfully',
@@ -107,6 +127,48 @@ export class UploadService {
       console.error('');
       
       return { success: false, message: 'Upload failed', data: { error: error.message } };
+    }
+  }
+
+  /**
+   * Trigger PDF embedding for vector search
+   * Called automatically after successful PDF processing
+   */
+  async triggerPDFEmbedding(
+    courseId: string,
+    filePath: string,
+  ): Promise<any> {
+    try {
+      const doclingServiceUrl = process.env.DOCLING_SERVICE_URL || 'http://localhost:5000';
+
+      this.logger.log(`[triggerPDFEmbedding] Starting for course ${courseId}...`);
+
+      // Send file to docling service for embedding
+      const formData = new FormData();
+      const fileBuffer = require('fs').readFileSync(filePath);
+      const blob = new Blob([fileBuffer]);
+      formData.append('file', blob, require('path').basename(filePath));
+
+      this.logger.log(`[triggerPDFEmbedding] Attempting Docling service at ${doclingServiceUrl}`);
+      const response = await axios.post(
+        `${doclingServiceUrl}/embed-pdf?course_id=${courseId}`,
+        formData,
+        {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        },
+      );
+
+      this.logger.log(`[triggerPDFEmbedding] PDF embedding triggered successfully for course ${courseId}`);
+      return response.data;
+    } catch (error) {
+      this.logger.error(`[triggerPDFEmbedding] Docling service failed: ${error.message}`);
+      return { 
+        status: 'error',
+        message: 'PDF embedding failed - Python Docling service is required',
+        error: error.message,
+      };
     }
   }
 }

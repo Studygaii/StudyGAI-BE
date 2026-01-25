@@ -19,6 +19,7 @@ const groupchat_schema_1 = require("../schemas/groupchat.schema");
 const jwt_1 = require("@nestjs/jwt");
 const chat_gateway_1 = require("./chat.gateway");
 const groupchat_module_1 = require("./groupchat.module");
+const qdrant_module_1 = require("../qdrant/qdrant.module");
 let ChatModule = class ChatModule {
 };
 exports.ChatModule = ChatModule;
@@ -32,6 +33,7 @@ exports.ChatModule = ChatModule = __decorate([
             ]),
             pdf_module_1.PdfModule,
             groq_module_1.GroqModule,
+            qdrant_module_1.QdrantModule,
             jwt_1.JwtModule.register({
                 secret: process.env.JWTKey || 'your-secret-key',
             }),

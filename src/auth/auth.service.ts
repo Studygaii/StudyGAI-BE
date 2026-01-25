@@ -69,7 +69,7 @@ export class AuthService {
         success: true,
         message: 'Registration successful',
         data: { 
-          token: 'Bearer ' + token, 
+          token:  token, 
           user: payload 
         }
       };
@@ -111,7 +111,7 @@ export class AuthService {
       success: true,
       message: 'Login successful',
       data: { 
-        token: 'Bearer ' + token, 
+        token: token, 
         user: payload 
       }
     };
@@ -166,7 +166,7 @@ export class AuthService {
         success: true,
         message: 'Google authentication successful',
         data: { 
-          token: 'Bearer ' + token, 
+          token: token, 
           user: payload 
         }
       };

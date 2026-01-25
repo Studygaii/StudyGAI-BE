@@ -21,11 +21,14 @@ const mongoose_1 = require("@nestjs/mongoose");
 const mongoose_2 = require("mongoose");
 const mongoose_3 = __importDefault(require("mongoose"));
 const groq_service_1 = require("../common/groq.service");
+const qdrant_service_1 = require("../qdrant/qdrant.service");
 let FlashcardService = class FlashcardService {
     constructor(courseModel, // operate on courses
-    groqService) {
+    groqService, // inject Groq service
+    qdrantService) {
         this.courseModel = courseModel;
         this.groqService = groqService;
+        this.qdrantService = qdrantService;
     }
     // Add flashcards to a course (bulk create)
     async create(body) {
@@ -233,7 +236,7 @@ let FlashcardService = class FlashcardService {
     }
     /**
      * Generate flashcards from course PDF using Groq AI
-     * Called when user requests "@SAGE make flashcards on Chapter X"
+     * Called when user requests "@studyGAI make flashcards on Chapter X"
      */
     async generateFromPDF(courseId, userId, topic) {
         try {
@@ -341,6 +344,7 @@ exports.FlashcardService = FlashcardService = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)('courses')),
     __metadata("design:paramtypes", [mongoose_2.Model,
-        groq_service_1.GroqService])
+        groq_service_1.GroqService,
+        qdrant_service_1.QdrantService])
 ], FlashcardService);
 //# sourceMappingURL=flashcard.service.js.map

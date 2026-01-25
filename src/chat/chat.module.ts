@@ -10,6 +10,8 @@ import { GroupChatSchema } from '../schemas/groupchat.schema';
 import { JwtModule } from '@nestjs/jwt';
 import { ChatGateway } from './chat.gateway';
 import { GroupChatModule } from './groupchat.module';
+import { QdrantModule } from '../qdrant/qdrant.module';
+
 @Module({
   imports: [
     MongooseModule.forFeature([
@@ -19,6 +21,7 @@ import { GroupChatModule } from './groupchat.module';
     ]),
     PdfModule,
     GroqModule,
+    QdrantModule,
     JwtModule.register({
       secret: process.env.JWTKey || 'your-secret-key',
     }),

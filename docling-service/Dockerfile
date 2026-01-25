@@ -3,22 +3,28 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+# Set pip environment variables for better download reliability
+ENV PIP_DEFAULT_TIMEOUT=10000 \
+    PIP_RETRIES=10 \
+    PIP_NO_CACHE_DIR=1
+
 # Install system dependencies: curl (health check), poppler (pdf2image), tesseract-ocr (pytesseract)
-RUN apt-get update && apt-get install -y \
-    gcc \
+# Using --no-install-recommends to reduce memory footprint during build
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     poppler-utils \
     tesseract-ocr \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Copy requirements file
 COPY requirements.txt .
 
-# Install Python dependencies with increased timeout for large packages
-RUN pip install --no-cache-dir --default-timeout=1000 -r requirements.txt
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py .
+COPY main.py embeddings.py .
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
