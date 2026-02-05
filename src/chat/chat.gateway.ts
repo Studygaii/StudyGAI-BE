@@ -11,6 +11,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Injectable } from '@nestjs/common';
 import { ChatService } from '../chat/chat.service';
+import { GroupChatService } from './groupchat.service';
 import { JwtService } from '@nestjs/jwt';
 
 interface AuthenticatedSocket extends Socket {
@@ -33,6 +34,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
   constructor(
     private chatService: ChatService,
+    private groupChatService: GroupChatService,
     private jwtService: JwtService,
   ) {}
 
@@ -136,7 +138,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     console.log(`User ${client.username} joined room ${roomId}`);
   }
 
-  // Send message in a room
+  // Send message in a room (1:1 chat or group chat)
   @SubscribeMessage('send-message')
   async handleSendMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
@@ -144,10 +146,12 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       roomId: string;
       message: string;
       chatId?: string;
+      groupChatId?: string;
       isGroupChat?: boolean;
+      courseId?: string;
     },
   ) {
-    const { roomId, message, chatId, isGroupChat } = data;
+    const { roomId, message, chatId, groupChatId, isGroupChat, courseId } = data;
 
     const messagePayload = {
       userId: client.userId,
@@ -156,13 +160,63 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       roomId,
       timestamp: new Date(),
       messageId: Date.now().toString(),
+      isAI: false,
     };
 
     // Broadcast message to room
     this.server.to(roomId).emit('message', messagePayload);
 
-    // Optionally save to database
-    if (chatId) {
+    // Save to group chat database
+    if (isGroupChat && groupChatId) {
+      try {
+        await this.groupChatService.addMessage(groupChatId, {
+          role: 'user',
+          content: message,
+          sender: client.userId,
+          senderName: client.username,
+          date: new Date(),
+        });
+      } catch (error) {
+        console.error('Error saving group chat message:', error);
+      }
+
+      // Check for @studygai mention - trigger AI response
+      const hasMention = /@studygai/i.test(message);
+      if (hasMention && courseId) {
+        try {
+          const messages = [{ role: 'user' as const, content: message.replace(/@studygai\s*/gi, '').trim() || message }];
+          const response = await this.chatService.sendWithContext(messages, courseId);
+          const aiContent = response?.choices?.[0]?.message?.content || response?.message || 'I could not generate a response.';
+
+          const aiPayload = {
+            userId: 'studygai',
+            userName: 'StudyGAI',
+            message: aiContent,
+            roomId,
+            timestamp: new Date(),
+            isAI: true,
+          };
+          this.server.to(roomId).emit('ai-message', aiPayload);
+
+          await this.groupChatService.addMessage(groupChatId, {
+            role: 'assistant',
+            content: aiContent,
+            senderName: 'StudyGAI',
+            date: new Date(),
+            isAI: true,
+          });
+        } catch (aiError: any) {
+          this.server.to(roomId).emit('ai-message', {
+            userId: 'studygai',
+            userName: 'StudyGAI',
+            message: `Sorry, I encountered an error: ${aiError?.message || 'Unknown error'}`,
+            roomId,
+            timestamp: new Date(),
+            isAI: true,
+          });
+        }
+      }
+    } else if (chatId) {
       try {
         await this.chatService.addMessageToChat(chatId, {
           role: 'user',
@@ -177,7 +231,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
-  // Send AI response
+  // Send AI response (uses @studygai context when courseId provided)
   @SubscribeMessage('send-ai-message')
   async handleAIMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
@@ -186,18 +240,19 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       messages: Array<{ role: string; content: string }>;
       courseId?: string;
       chatId?: string;
+      groupChatId?: string;
     },
   ) {
-    const { roomId, messages, courseId, chatId } = data;
+    const { roomId, messages, courseId, chatId, groupChatId } = data;
 
     try {
-      // Get AI response
-      const response = await this.chatService.send(messages, courseId);
+      // Use sendWithContext for @studygai vector search when courseId provided
+      const response = await this.chatService.sendWithContext(messages, courseId);
 
       const aiMessage = {
-        userId: 'ai-assistant',
-        userName: 'AI Assistant',
-        message: response.choices?.[0]?.message?.content || 'No response',
+        userId: 'studygai',
+        userName: 'StudyGAI',
+        message: response?.choices?.[0]?.message?.content || response?.message || 'No response',
         roomId,
         timestamp: new Date(),
         isAI: true,
@@ -207,7 +262,15 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       this.server.to(roomId).emit('ai-message', aiMessage);
 
       // Save to database
-      if (chatId) {
+      if (groupChatId) {
+        await this.groupChatService.addMessage(groupChatId, {
+          role: 'assistant',
+          content: aiMessage.message,
+          senderName: 'StudyGAI',
+          date: new Date(),
+          isAI: true,
+        });
+      } else if (chatId) {
         await this.chatService.addMessageToChat(chatId, {
           role: 'assistant',
           content: aiMessage.message,

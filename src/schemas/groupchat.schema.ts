@@ -6,9 +6,10 @@ export type GroupChatDocument = GroupChat & Document;
 export interface IGroupMessage {
   role: string;
   content: string;
-  sender: Types.ObjectId;
+  sender?: Types.ObjectId;
   senderName?: string;
   date?: Date;
+  isAI?: boolean;
 }
 
 @Schema({ timestamps: true })
@@ -33,9 +34,10 @@ export class GroupChat {
       {
         role: { type: String, required: true },
         content: { type: String, required: true },
-        sender: { type: Types.ObjectId, ref: 'users', required: true },
+        sender: { type: Types.ObjectId, ref: 'users', required: false }, // optional for AI/StudyGAI
         senderName: { type: String },
         date: { type: Date, default: Date.now },
+        isAI: { type: Boolean, default: false },
       },
     ],
     default: [],
