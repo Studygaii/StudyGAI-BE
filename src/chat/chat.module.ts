@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ChatSchema } from '../schemas/chat.schema';
 import { ChatController } from './chat.controller';
@@ -25,7 +25,7 @@ import { QdrantModule } from '../qdrant/qdrant.module';
     JwtModule.register({
       secret: process.env.JWTKey || 'your-secret-key',
     }),
-    GroupChatModule,
+    forwardRef(() => GroupChatModule),
   ],
   controllers: [ChatController],
   providers: [ChatService, ChatGateway],

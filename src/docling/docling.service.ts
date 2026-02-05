@@ -117,11 +117,43 @@ export class DoclingService {
   }
 
   /**
+   * Convert image (PNG, JPG, JPEG, WEBP) to text using OCR.
+   */
+  async convertImageToText(filePath: string): Promise<string> {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Image file not found: ${filePath}`);
+    }
+
+    const fileStats = fs.statSync(filePath);
+    this.logger.log(
+      `Converting image to text via OCR: ${filePath} (${fileStats.size} bytes)`,
+    );
+
+    const formData = this.createFormData(filePath);
+    const response = await this.axiosInstance.post<ConversionResponse>(
+      '/convert-image',
+      formData,
+      { headers: formData.getHeaders() },
+    );
+
+    if (response.data.status === 'success' && response.data.markdown) {
+      this.logger.log(
+        `OCR extraction successful: ${response.data.char_count} characters`,
+      );
+      return response.data.markdown;
+    }
+
+    throw new Error(
+      response.data.error || 'Unknown image conversion error',
+    );
+  }
+
+  /**
    * Convert DOCX or PDF with endpoint selection.
    */
   async convertFileRich(
     filePath: string,
-    endpoint: '/convert-pdf' | '/convert-docx' = '/convert-pdf',
+    endpoint: '/convert-pdf' | '/convert-docx' | '/convert-image' = '/convert-pdf',
   ): Promise<{
     markdown: string;
     json?: any;

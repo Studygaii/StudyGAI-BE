@@ -81,6 +81,23 @@ export class PdfService {
         return extractedText;
       }
 
+      // Image files: use Docling OCR service
+      const imageExts = ['png', 'jpg', 'jpeg', 'webp'];
+      if (imageExts.includes(ext || '')) {
+        try {
+          const isHealthy = await this.doclingService.healthCheck();
+          if (isHealthy) {
+            const ocrText = await this.doclingService.convertImageToText(filePath);
+            if (ocrText && ocrText.trim().length > 0) return ocrText;
+          }
+        } catch (err) {
+          console.warn('Docling OCR failed:', (err as Error)?.message || err);
+        }
+        throw new Error(
+          'Image OCR failed. Ensure Docling service is running with pytesseract and Tesseract OCR installed.',
+        );
+      }
+
       // Try docx/doc using mammoth if available
       if (ext === 'docx' || ext === 'doc' || ext === 'docm') {
         try {
@@ -266,13 +283,18 @@ async savePdfContent(
 
       // Try Docling service first for better structured output
       try {
-        this.logger.log('Attempting to use Docling service for PDF conversion');
+        this.logger.log('Attempting to use Docling service for conversion');
         const isHealthy = await this.doclingService.healthCheck();
         
         if (isHealthy) {
-          const endpoint =
-            ext === 'docx' ? '/convert-docx' : '/convert-pdf';
-          const rich = await this.doclingService.convertFileRich(filePath, endpoint as any);
+          const imageExts = ['png', 'jpg', 'jpeg', 'webp'];
+          let endpoint: '/convert-pdf' | '/convert-docx' | '/convert-image' = '/convert-pdf';
+          if (imageExts.includes(ext || '')) {
+            endpoint = '/convert-image';
+          } else if (ext === 'docx' || ext === 'doc' || ext === 'docm') {
+            endpoint = '/convert-docx';
+          }
+          const rich = await this.doclingService.convertFileRich(filePath, endpoint);
           pdfText = rich.markdown;
           pdfJson = rich.json || null;
           pageCount = rich.pageCount ?? null;
