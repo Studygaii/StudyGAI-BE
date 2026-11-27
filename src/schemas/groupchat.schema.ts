@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 export type GroupChatDocument = GroupChat & Document;
 
@@ -20,13 +20,13 @@ export class GroupChat {
   @Prop({ type: String })
   description: string;
 
-  @Prop({ type: Types.ObjectId, ref: 'users', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'users', required: true })
   creator: Types.ObjectId;
 
-  @Prop({ type: [{ type: Types.ObjectId, ref: 'users' }], required: true })
+  @Prop({ type: [{ type: MongooseSchema.Types.ObjectId, ref: 'users' }], required: true })
   members: Types.ObjectId[];
 
-  @Prop({ type: Types.ObjectId, ref: 'courses', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'courses', required: true })
   course: Types.ObjectId;
 
   @Prop({
@@ -34,7 +34,7 @@ export class GroupChat {
       {
         role: { type: String, required: true },
         content: { type: String, required: true },
-        sender: { type: Types.ObjectId, ref: 'users', required: false }, // optional for AI/StudyGAI
+        sender: { type: MongooseSchema.Types.ObjectId, ref: 'users', required: false }, // optional for AI/StudyGAI
         senderName: { type: String },
         date: { type: Date, default: Date.now },
         isAI: { type: Boolean, default: false },

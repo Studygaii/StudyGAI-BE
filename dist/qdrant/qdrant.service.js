@@ -1,10 +1,43 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
 var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
     var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
     if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
     else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
     return c > 3 && r && Object.defineProperty(target, key, r), r;
 };
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
@@ -15,401 +48,570 @@ var QdrantService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.QdrantService = void 0;
 const common_1 = require("@nestjs/common");
+const config_1 = require("@nestjs/config");
 const axios_1 = __importDefault(require("axios"));
-const embeddings_service_1 = require("../embeddings/embeddings.service");
+const crypto = __importStar(require("crypto"));
+const cache_service_1 = require("../cache/cache.service");
+const sparse_encoder_service_1 = require("../rag/sparse-encoder.service");
+const metrics_service_1 = require("../ops/metrics.service");
+/**
+ * Production 100M-User Multi-Tenant Hybrid Qdrant Service.
+ *
+ * Scaling Features:
+ * - Named vectors (`dense` + `sparse`) with configurable INT8 Scalar (4x RAM cut) or
+ *   1-bit Binary Quantization (32x RAM cut) + Two-Stage Oversample & NVMe Rescoring.
+ * - Tenant-aware HNSW (`m: 0, payload_m: 16`) + explicit `is_tenant: true` payload indexes
+ *   on `blob_id` and `course_id`.
+ * - Optional Custom Shard-Key Routing (`QDRANT_SHARDING_MODE=custom`, `QDRANT_SHARD_COUNT=16..64`)
+ *   so writes and filtered reads route strictly to owning shard(s) across distributed nodes.
+ * - Export & Restore APIs (`exportBlobPoints`, `restoreBlobPoints`) powering Hot/Cold S3 Tiering.
+ */
 let QdrantService = QdrantService_1 = class QdrantService {
-    constructor(embeddingsService) {
-        this.embeddingsService = embeddingsService;
+    constructor(configService, cache, sparseEncoder, metrics) {
+        this.configService = configService;
+        this.cache = cache;
+        this.sparseEncoder = sparseEncoder;
+        this.metrics = metrics;
         this.logger = new common_1.Logger(QdrantService_1.name);
-        this.qdrantUrl = process.env.QDRANT_URL || 'http://localhost:6333';
-        this.apiKey = process.env.QDRANT_API_KEY;
-        this.logger.log(`Initialized Qdrant service: ${this.qdrantUrl}`);
+        this.qdrantUrl = (this.configService.get('QDRANT_URL') || 'http://localhost:6333').replace(/\/$/, '');
+        this.apiKey = this.configService.get('QDRANT_API_KEY');
+        this.workerUrl = (this.configService.get('RAG_WORKER_URL') ||
+            this.configService.get('DOCLING_SERVICE_URL') ||
+            'http://localhost:5000').replace(/\/$/, '');
+        this.defaultCollection = this.configService.get('QDRANT_COLLECTION', 'source_chunks');
+        const profile = (this.configService.get('RAG_PROFILE', 'cpu') || 'cpu').toLowerCase();
+        const defaultDim = profile === 'gpu' ? 1024 : 384;
+        this.vectorSize = Number(this.configService.get('VECTOR_DIM', String(defaultDim)));
+        this.quantizationMode = (this.configService.get('QDRANT_QUANTIZATION', 'scalar') || 'scalar').toLowerCase();
+        this.shardingMode = (this.configService.get('QDRANT_SHARDING_MODE', 'auto') || 'auto').toLowerCase();
+        this.shardCount = Math.max(1, Number(this.configService.get('QDRANT_SHARD_COUNT', '16')));
+        this.replicationFactor = Math.max(1, Number(this.configService.get('QDRANT_REPLICATION_FACTOR', '1')));
+        this.logger.log(`QdrantService configured: url=${this.qdrantUrl}, collection=${this.defaultCollection}, dim=${this.vectorSize}, quant=${this.quantizationMode}, sharding=${this.shardingMode}(${this.shardCount})`);
     }
-    /**
-     * Initialize collections on module startup
-     */
     async onModuleInit() {
-        this.logger.log('Initializing Qdrant collections...');
         try {
-            await this.initializePdfChunksCollection();
-            this.logger.log('Qdrant collections initialized successfully');
+            await this.ensureCollection(this.defaultCollection);
         }
         catch (error) {
-            this.logger.error(`Failed to initialize Qdrant collections: ${error.message}`);
-            throw error;
+            this.logger.warn(`Qdrant startup init skipped (${error.message}); will ensure on first vector operation`);
         }
     }
+    getDefaultCollection() {
+        return this.defaultCollection;
+    }
     /**
-     * Initialize the pdf_chunks collection if it doesn't exist
+     * Deterministic Shard-Key Router for 100M+ user Qdrant clusters.
+     * Maps any `blobId` stably to `shard_00`..`shard_<N-1>` so writes and reads hit
+     * ONLY the owning shard(s) instead of fanning out across every cluster node.
      */
-    async initializePdfChunksCollection() {
-        const collectionName = 'pdf_chunks';
-        try {
-            // Check if collection exists
-            const exists = await this.collectionExists(collectionName);
-            if (exists) {
-                this.logger.log(`Collection "${collectionName}" already exists`);
-                return;
-            }
-            // Create collection with proper schema
-            this.logger.log(`Creating collection "${collectionName}"...`);
-            await axios_1.default.put(`${this.qdrantUrl}/collections/${collectionName}`, {
-                vectors: {
-                    size: 384, // all-MiniLM-L6-v2 embedding size
+    computeShardKey(blobId, shardCount = this.shardCount) {
+        const safeCount = Math.max(1, shardCount);
+        const digest = crypto.createHash('sha256').update(blobId || '', 'utf8').digest();
+        const bucket = digest.readUInt32BE(0) % safeCount;
+        return `shard_${String(bucket).padStart(2, '0')}`;
+    }
+    /** Compute deduplicated list of shard keys for a batch of active notebook blobIds */
+    computeShardKeysForBlobs(blobIds) {
+        if (this.shardingMode !== 'custom' || !blobIds || blobIds.length === 0)
+            return undefined;
+        return Array.from(new Set(blobIds.map((id) => this.computeShardKey(id))));
+    }
+    /** Build Qdrant collection creation payload (exposed for unit verification) */
+    buildCollectionSchema() {
+        const quantizationConfig = this.quantizationMode === 'binary'
+            ? { binary: { always_ram: true } }
+            : this.quantizationMode === 'scalar'
+                ? { scalar: { type: 'int8', quantile: 0.99, always_ram: true } }
+                : undefined;
+        return {
+            vectors: {
+                dense: {
+                    size: this.vectorSize,
                     distance: 'Cosine',
+                    on_disk: true,
                 },
-                payload_schema: {
-                    course_id: {
-                        type: 'keyword',
-                        index: true,
-                    },
-                    text: {
-                        type: 'text',
-                    },
-                    chunk_index: {
-                        type: 'integer',
-                    },
-                    pdf_name: {
-                        type: 'keyword',
-                        index: true,
-                    },
-                    page_number: {
-                        type: 'integer',
-                    },
-                    metadata: {
-                        type: 'object',
-                    },
+            },
+            sparse_vectors: {
+                sparse: {
+                    modifier: 'idf',
                 },
-            }, {
-                headers: this.getHeaders(),
-            });
-            this.logger.log(`Collection "${collectionName}" created successfully`);
+            },
+            hnsw_config: {
+                m: 0,
+                payload_m: 16,
+            },
+            ...(quantizationConfig ? { quantization_config: quantizationConfig } : {}),
+            ...(this.shardingMode === 'custom'
+                ? {
+                    sharding_method: 'custom',
+                    replication_factor: this.replicationFactor,
+                }
+                : {}),
+        };
+    }
+    async ensureCollection(collectionName = this.defaultCollection) {
+        const exists = await this.collectionExists(collectionName);
+        if (!exists) {
+            this.logger.log(`Creating hybrid multi-tenant collection "${collectionName}" (dim=${this.vectorSize}, quant=${this.quantizationMode}, sharding=${this.shardingMode})...`);
+            const body = this.buildCollectionSchema();
+            try {
+                await axios_1.default.put(`${this.qdrantUrl}/collections/${collectionName}`, body, {
+                    headers: this.getHeaders(),
+                    timeout: 15000,
+                });
+            }
+            catch (err) {
+                if (err?.response?.status !== 409) {
+                    body.sparse_vectors.sparse = {};
+                    await axios_1.default.put(`${this.qdrantUrl}/collections/${collectionName}`, body, {
+                        headers: this.getHeaders(),
+                        timeout: 15000,
+                    });
+                }
+            }
+            // Provision custom shard keys when custom sharding is enabled
+            if (this.shardingMode === 'custom') {
+                for (let i = 0; i < this.shardCount; i++) {
+                    const shardKey = `shard_${String(i).padStart(2, '0')}`;
+                    await axios_1.default
+                        .put(`${this.qdrantUrl}/collections/${collectionName}/shards`, { shard_key: shardKey }, { headers: this.getHeaders(), timeout: 10000 })
+                        .catch(() => undefined);
+                }
+            }
         }
-        catch (error) {
-            if (error.response?.status === 400) {
-                this.logger.log(`Collection "${collectionName}" already exists`);
-            }
-            else {
-                throw error;
-            }
+        const indexes = [
+            { field_name: 'blob_id', field_schema: { type: 'keyword', is_tenant: true } },
+            { field_name: 'course_id', field_schema: { type: 'keyword', is_tenant: true } },
+            { field_name: 'source_type', field_schema: 'keyword' },
+            { field_name: 'page_number', field_schema: 'integer' },
+        ];
+        for (const idx of indexes) {
+            await axios_1.default
+                .put(`${this.qdrantUrl}/collections/${collectionName}/index`, idx, {
+                headers: this.getHeaders(),
+                timeout: 10000,
+            })
+                .catch((err) => {
+                this.logger.debug(`Payload index "${idx.field_name}" note: ${err.message}`);
+            });
         }
     }
-    /**
-     * Check if a collection exists in Qdrant
-     */
     async collectionExists(collectionName) {
         try {
             const response = await axios_1.default.get(`${this.qdrantUrl}/collections/${collectionName}`, {
                 headers: this.getHeaders(),
+                timeout: 8000,
             });
             return response.status === 200;
         }
         catch (error) {
-            if (error.response?.status === 404) {
+            if (error?.response?.status === 404)
                 return false;
+            throw error;
+        }
+    }
+    async embedQuery(query) {
+        const normalized = (query || '').trim();
+        const sparse = this.sparseEncoder.encode(normalized);
+        const cacheKey = `rag:qemb:${crypto.createHash('sha256').update(normalized.toLowerCase()).digest('hex')}`;
+        const cached = await this.cache.get(cacheKey).catch(() => null);
+        if (cached && Array.isArray(cached.dense) && cached.dense.length > 0) {
+            this.metrics.incCounter('studygai_rag_cache_events_total', {
+                layer: 'query_embedding',
+                outcome: 'hit',
+            });
+            return cached;
+        }
+        this.metrics.incCounter('studygai_rag_cache_events_total', {
+            layer: 'query_embedding',
+            outcome: 'miss',
+        });
+        const cloudEmbUrl = this.configService.get('EMBEDDING_API_URL');
+        const cloudEmbKey = this.configService.get('EMBEDDING_API_KEY');
+        const cloudEmbModel = this.configService.get('EMBEDDING_API_MODEL', 'text-embedding-3-small');
+        if (cloudEmbUrl && cloudEmbKey) {
+            try {
+                const resp = await axios_1.default.post(cloudEmbUrl, { input: normalized, model: cloudEmbModel }, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${cloudEmbKey}`,
+                    },
+                    timeout: 15000,
+                });
+                const dense = resp.data?.data?.[0]?.embedding || resp.data?.embeddings?.[0] || [];
+                if (Array.isArray(dense) && dense.length > 0) {
+                    const result = { dense, sparse, model: cloudEmbModel };
+                    await this.cache.set(cacheKey, result, 86400).catch(() => undefined);
+                    return result;
+                }
             }
-            throw error;
+            catch (err) {
+                this.logger.warn(`Cloud embedding API failed (${err.message}); falling back to RAG worker`);
+            }
         }
-    }
-    /**
-     * Search for similar chunks in Qdrant for a given query and course
-     */
-    async searchSimilarChunks(query, courseId, limit = 5, collectionName = 'pdf_chunks') {
         try {
-            this.logger.debug(`Searching for similar chunks: query="${query}", courseId="${courseId}", limit=${limit}`);
-            // Call Qdrant search API directly (via HTTP)
-            const response = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/search`, {
-                vector: [], // Will be populated by the backend
-                limit: limit,
-                filter: {
-                    must: [
-                        {
-                            key: 'payload.course_id',
-                            match: {
-                                value: courseId,
-                            },
-                        },
-                    ],
-                },
-                with_payload: true,
-                with_vectors: false,
-            }, {
-                headers: this.getHeaders(),
-            });
-            // Map results to our format
-            // Handle both array and object with points property
-            const points = Array.isArray(response.data.result) ? response.data.result : response.data.result?.points || [];
-            const results = points.map((hit) => ({
-                score: hit.score,
-                text: hit.payload.text || '',
-                chunkIndex: hit.payload.chunk_index || -1,
-                metadata: hit.payload.metadata || {},
-            }));
-            this.logger.debug(`Found ${results.length} similar chunks`);
-            return results;
-        }
-        catch (error) {
-            this.logger.error(`Failed to search similar chunks: ${error.message}`);
-            throw error;
-        }
-    }
-    /**
-     * Get chunks for a specific course
-     */
-    async getCoursChunks(courseId, limit = 10, collectionName = 'pdf_chunks') {
-        try {
-            this.logger.debug(`Fetching chunks for course: ${courseId}`);
-            const response = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/scroll`, {
-                filter: {
-                    must: [
-                        {
-                            key: 'courseId',
-                            match: {
-                                value: courseId,
-                            },
-                        },
-                    ],
-                },
-                limit: limit,
-                with_payload: true,
-                with_vectors: false,
-            }, {
-                headers: this.getHeaders(),
-            });
-            // Handle both array and object with points property
-            const points = Array.isArray(response.data.result) ? response.data.result : response.data.result?.points || [];
-            const results = points.map((point) => ({
-                score: 1,
-                text: point.payload.text || '',
-                chunkIndex: point.payload.chunkIndex || -1,
-                metadata: point.payload.metadata || {},
-            }));
-            this.logger.debug(`Retrieved ${results.length} chunks for course ${courseId}`);
-            return results;
-        }
-        catch (error) {
-            this.logger.error(`Failed to get course chunks: ${error.message}`);
-            throw error;
-        }
-    }
-    /**
-     * Delete all chunks for a course
-     */
-    async deleteCoursChunks(courseId, collectionName = 'pdf_chunks') {
-        try {
-            this.logger.debug(`Deleting chunks for course: ${courseId}`);
-            await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/delete`, {
-                filter: {
-                    must: [
-                        {
-                            key: 'payload.course_id',
-                            match: {
-                                value: courseId,
-                            },
-                        },
-                    ],
-                },
-            }, {
-                headers: this.getHeaders(),
-            });
-            this.logger.debug(`Deleted all chunks for course ${courseId}`);
-            return true;
-        }
-        catch (error) {
-            this.logger.error(`Failed to delete course chunks: ${error.message}`);
-            throw error;
-        }
-    }
-    /**
-     * Get embedding stats from docling service
-     */
-    async getEmbeddingStats(courseId, collectionName = 'pdf_chunks') {
-        try {
-            this.logger.debug(`Getting embedding stats for course: ${courseId}`);
-            const response = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/scroll`, {
-                filter: {
-                    must: [
-                        {
-                            key: 'payload.course_id',
-                            match: {
-                                value: courseId,
-                            },
-                        },
-                    ],
-                },
-                limit: 1,
-                with_payload: true,
-                with_vectors: false,
-            }, {
-                headers: this.getHeaders(),
-            });
-            // Handle both array and object with points property
-            const points = Array.isArray(response.data.result) ? response.data.result : response.data.result?.points || [];
-            if (points.length === 0) {
-                return {
-                    courseId,
-                    totalChunks: 0,
-                    hasEmbeddings: false,
+            const resp = await axios_1.default.post(`${this.workerUrl}/embed/query`, { query: normalized }, { timeout: 15000 });
+            if (resp.data?.status === 'success' && Array.isArray(resp.data?.dense)) {
+                const result = {
+                    dense: resp.data.dense,
+                    sparse: resp.data.sparse?.indices ? resp.data.sparse : sparse,
+                    model: resp.data.model || 'worker-default',
                 };
+                await this.cache.set(cacheKey, result, 86400).catch(() => undefined);
+                return result;
             }
-            const firstPoint = points[0];
-            return {
-                courseId,
-                totalChunks: firstPoint.payload.chunk_count || 0,
-                hasEmbeddings: true,
-                source: firstPoint.payload.metadata?.source || 'unknown',
-            };
         }
-        catch (error) {
-            this.logger.error(`Failed to get embedding stats: ${error.message}`);
-            throw error;
+        catch (err) {
+            this.logger.warn(`RAG worker /embed/query unreachable (${err.message}); using sparse-only fallback`);
         }
+        return { dense: [], sparse, model: 'sparse-only-fallback' };
     }
-    /**
-     * Search across multiple courses
-     */
-    async searchGlobal(query, limit = 10, collectionName = 'pdf_chunks') {
-        try {
-            this.logger.debug(`Performing global search: query="${query}", limit=${limit}`);
-            // This would require the backend to generate embeddings for the query
-            // For now, returning empty as we need query embedding from Python service
-            this.logger.warn('Global search requires query embedding from Python service');
+    async hybridSearch(params) {
+        const { query, blobIds, courseId, prefetchLimit = 40, limit = 24, rerankTopK = 10, collectionName = this.defaultCollection, } = params;
+        const must = [];
+        if (blobIds && blobIds.length > 0) {
+            must.push({ key: 'blob_id', match: { any: blobIds } });
+        }
+        else if (courseId) {
+            must.push({ key: 'course_id', match: { value: courseId } });
+        }
+        else {
             return [];
         }
-        catch (error) {
-            this.logger.error(`Failed to perform global search: ${error.message}`);
-            throw error;
+        const filter = { must };
+        const shardKey = blobIds ? this.computeShardKeysForBlobs(blobIds) : undefined;
+        const searchParams = this.quantizationMode !== 'none'
+            ? { quantization: { ignore: false, rescore: true, oversampling: this.quantizationMode === 'binary' ? 3.0 : 2.0 } }
+            : undefined;
+        const qEmb = await this.embedQuery(query);
+        const prefetch = [];
+        if (qEmb.dense.length > 0) {
+            prefetch.push({
+                query: qEmb.dense,
+                using: 'dense',
+                limit: prefetchLimit,
+                filter,
+                ...(searchParams ? { params: searchParams } : {}),
+            });
         }
-    }
-    /**
-     * Store text chunks with embeddings in Qdrant
-     */
-    async storeChunksWithEmbeddings(chunks, courseId, collectionName = 'pdf_chunks') {
+        if (qEmb.sparse.indices.length > 0) {
+            prefetch.push({
+                query: qEmb.sparse,
+                using: 'sparse',
+                limit: prefetchLimit,
+                filter,
+            });
+        }
+        if (prefetch.length === 0)
+            return [];
+        let rawPoints = [];
         try {
-            this.logger.log(`[storeChunksWithEmbeddings] Storing ${chunks.length} chunks for course ${courseId}`);
-            if (!chunks || chunks.length === 0) {
-                this.logger.warn(`[storeChunksWithEmbeddings] No chunks provided`);
-                return {
-                    status: 'success',
-                    chunksCreated: 0,
-                    embeddingsGenerated: 0,
-                    pointsStored: 0,
-                    collectionName,
-                };
+            const resp = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/query`, prefetch.length > 1
+                ? {
+                    prefetch,
+                    query: { fusion: 'rrf' },
+                    limit,
+                    with_payload: true,
+                    ...(shardKey ? { shard_key: shardKey } : {}),
+                }
+                : {
+                    query: prefetch[0].query,
+                    using: prefetch[0].using,
+                    filter,
+                    limit,
+                    with_payload: true,
+                    ...(searchParams && prefetch[0].using === 'dense' ? { params: searchParams } : {}),
+                    ...(shardKey ? { shard_key: shardKey } : {}),
+                }, { headers: this.getHeaders(), timeout: 15000 });
+            const res = resp.data?.result;
+            rawPoints = Array.isArray(res) ? res : res?.points || [];
+        }
+        catch (err) {
+            this.logger.warn(`Qdrant /points/query fallback (${err.message})`);
+            if (qEmb.dense.length > 0) {
+                const resp = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/search`, {
+                    vector: { name: 'dense', vector: qEmb.dense },
+                    filter,
+                    limit,
+                    with_payload: true,
+                    ...(searchParams ? { params: searchParams } : {}),
+                    ...(shardKey ? { shard_key: shardKey } : {}),
+                }, { headers: this.getHeaders(), timeout: 15000 });
+                rawPoints = resp.data?.result || [];
             }
-            // Generate embeddings for all chunks
-            this.logger.log(`[storeChunksWithEmbeddings] Generating embeddings for ${chunks.length} chunks`);
-            const embeddings = await this.embeddingsService.generateEmbeddings(chunks);
-            this.logger.log(`[storeChunksWithEmbeddings] Generated ${embeddings?.length || 0} embeddings`);
-            if (!embeddings || embeddings.length === 0) {
-                this.logger.error('[storeChunksWithEmbeddings] Failed to generate embeddings');
-                return {
-                    status: 'failed',
-                    chunksCreated: chunks.length,
-                    embeddingsGenerated: 0,
-                    pointsStored: 0,
-                    collectionName,
-                };
+        }
+        const mapped = rawPoints.map((hit) => this.mapPointToResult(hit));
+        if (mapped.length === 0)
+            return [];
+        return this.rerank(query, mapped, rerankTopK);
+    }
+    async searchSimilarChunks(query, courseId, limit = 8, collectionName = this.defaultCollection) {
+        return this.hybridSearch({
+            query,
+            courseId,
+            limit: Math.max(limit * 3, 20),
+            rerankTopK: limit,
+            collectionName,
+        });
+    }
+    async rerank(query, candidates, topK = 10) {
+        if (candidates.length <= 1)
+            return candidates.slice(0, topK);
+        const rerankApiUrl = this.configService.get('RERANK_API_URL');
+        const rerankApiKey = this.configService.get('RERANK_API_KEY');
+        const rerankApiModel = this.configService.get('RERANK_API_MODEL', 'rerank-v3.5');
+        if (rerankApiUrl && rerankApiKey) {
+            try {
+                const resp = await axios_1.default.post(rerankApiUrl, {
+                    model: rerankApiModel,
+                    query,
+                    documents: candidates.map((c) => c.text.slice(0, 2000)),
+                    top_n: topK,
+                }, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${rerankApiKey}`,
+                    },
+                    timeout: 15000,
+                });
+                const results = resp.data?.results || [];
+                if (Array.isArray(results) && results.length > 0) {
+                    return results
+                        .filter((r) => typeof r.index === 'number' && candidates[r.index])
+                        .map((r) => ({
+                        ...candidates[r.index],
+                        rerankScore: Number(r.relevance_score ?? r.score ?? 0),
+                    }));
+                }
             }
-            // Ensure collection exists
-            this.logger.log('[storeChunksWithEmbeddings] Initializing collection...');
-            await this.initializePdfChunksCollection();
-            // Create Qdrant points from chunks and embeddings
-            const points = chunks.map((chunk, index) => {
-                // Ensure vector is valid size (384 dimensions for all-MiniLM-L6-v2)
-                // If embedding is empty, use zeros
-                let vector = embeddings[index];
-                if (!vector || vector.length === 0) {
-                    vector = new Array(384).fill(0);
+            catch (err) {
+                this.logger.warn(`Cloud reranker failed (${err.message}); falling back to RAG worker`);
+            }
+        }
+        try {
+            const resp = await axios_1.default.post(`${this.workerUrl}/rerank`, {
+                query,
+                documents: candidates.map((c, idx) => ({
+                    id: idx,
+                    text: c.text.slice(0, 2000),
+                    score: c.score,
+                })),
+                top_k: topK,
+            }, { timeout: 15000 });
+            if (resp.data?.status === 'success' && Array.isArray(resp.data?.results)) {
+                return resp.data.results
+                    .filter((r) => typeof r.id === 'number' && candidates[r.id])
+                    .map((r) => ({
+                    ...candidates[r.id],
+                    rerankScore: Number(r.rerank_score ?? r.score ?? 0),
+                }));
+            }
+        }
+        catch (err) {
+            this.logger.debug(`Worker /rerank unavailable (${err.message}); using lexical rerank fallback`);
+        }
+        const scored = candidates.map((c) => {
+            const lex = this.sparseEncoder.lexicalOverlapScore(query, c.text);
+            return { ...c, rerankScore: Number((0.65 * c.score + 0.35 * lex).toFixed(6)) };
+        });
+        scored.sort((a, b) => (b.rerankScore || 0) - (a.rerankScore || 0));
+        return scored.slice(0, topK);
+    }
+    async upsertChildChunksFallback(params) {
+        const { children, blobId, courseId = '', sourceName, sourceType, collectionName = this.defaultCollection, } = params;
+        if (children.length === 0) {
+            return { chunksStored: 0, collection: collectionName };
+        }
+        await this.ensureCollection(collectionName);
+        const shardKey = this.shardingMode === 'custom' ? this.computeShardKey(blobId) : undefined;
+        const batchSize = 64;
+        let stored = 0;
+        for (let i = 0; i < children.length; i += batchSize) {
+            const batch = children.slice(i, i + batchSize);
+            const points = batch.map((c) => {
+                const sparse = this.sparseEncoder.encode(c.contextualText || c.text);
+                const vector = {};
+                if (sparse.indices.length > 0) {
+                    vector.sparse = sparse;
                 }
                 return {
-                    id: Math.floor(Date.now() * 1000) + index, // Use timestamp-based ID for uniqueness
-                    vector: vector,
+                    id: c.pointId,
+                    vector,
                     payload: {
-                        text: chunk,
-                        courseId: courseId,
-                        chunkIndex: index,
-                        chunkLength: chunk.length,
-                        timestamp: new Date().toISOString(),
-                        metadata: {
-                            source: courseId,
-                            type: 'pdf_chunk',
-                        },
+                        blob_id: blobId,
+                        course_id: courseId,
+                        source_name: sourceName,
+                        source_type: sourceType,
+                        chunk_index: c.childIndex,
+                        parent_index: c.parentIndex,
+                        page_number: c.pageNumber,
+                        section_path: c.sectionPath,
+                        text: c.text,
+                        has_formula: c.hasFormula,
+                        has_table: c.hasTable,
+                        token_count: c.tokenCount,
+                        chunk_count: children.length,
                     },
                 };
             });
-            // Upsert points to Qdrant in batches to avoid memory issues
-            const batchSize = 50;
-            let totalStored = 0;
-            for (let i = 0; i < points.length; i += batchSize) {
-                const batch = points.slice(i, Math.min(i + batchSize, points.length));
-                this.logger.log(`[storeChunksWithEmbeddings] Upserting batch ${Math.floor(i / batchSize) + 1}: ${batch.length} points`);
-                try {
-                    const upsertResponse = await axios_1.default.put(`${this.qdrantUrl}/collections/${collectionName}/points?wait=true`, { points: batch }, { headers: this.getHeaders() });
-                    // Qdrant returns 200 for success
-                    if (upsertResponse.status === 200 || upsertResponse.status === 201) {
-                        totalStored += batch.length;
-                        this.logger.log(`[storeChunksWithEmbeddings] Batch upsert successful: ${totalStored}/${points.length} stored`);
-                    }
-                    else {
-                        this.logger.warn(`[storeChunksWithEmbeddings] Batch upsert status: ${upsertResponse.status}`);
-                    }
-                }
-                catch (batchError) {
-                    this.logger.error(`[storeChunksWithEmbeddings] Batch upsert error: ${batchError.message}`);
-                    if (batchError.response?.status === 400) {
-                        this.logger.error(`[storeChunksWithEmbeddings] 400 Bad Request - payload may be invalid`);
-                        this.logger.debug(`First batch point: ${JSON.stringify(batch[0])}`);
-                    }
-                }
-            }
-            this.logger.log(`[storeChunksWithEmbeddings] Completed: ${totalStored}/${points.length} points stored`);
-            return {
-                status: totalStored > 0 ? 'success' : 'partial_success',
-                chunksCreated: chunks.length,
-                embeddingsGenerated: embeddings.length,
-                pointsStored: totalStored,
-                collectionName,
-            };
+            await axios_1.default.put(`${this.qdrantUrl}/collections/${collectionName}/points?wait=true`, {
+                points,
+                ...(shardKey ? { shard_key: shardKey } : {}),
+            }, { headers: this.getHeaders(), timeout: 30000 });
+            stored += points.length;
         }
-        catch (error) {
-            this.logger.error(`[storeChunksWithEmbeddings] Failed: ${error.message}`, error.stack);
-            throw error;
-        }
+        return { chunksStored: stored, collection: collectionName };
     }
     /**
-     * Check Qdrant health
+     * Export ALL points (including full dense + sparse vectors and payload) for a blob
+     * so VectorTieringService can archive inactive notebooks to cheap S3/R2 cold storage.
      */
+    async exportBlobPoints(blobId, collectionName = this.defaultCollection) {
+        const exported = [];
+        const shardKey = this.shardingMode === 'custom' ? this.computeShardKey(blobId) : undefined;
+        let offset = null;
+        for (let page = 0; page < 200; page++) {
+            const resp = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/scroll`, {
+                filter: { must: [{ key: 'blob_id', match: { value: blobId } }] },
+                limit: 128,
+                with_payload: true,
+                with_vector: true,
+                ...(offset !== null ? { offset } : {}),
+                ...(shardKey ? { shard_key: shardKey } : {}),
+            }, { headers: this.getHeaders(), timeout: 20000 });
+            const res = resp.data?.result || {};
+            const pts = Array.isArray(res) ? res : res.points || [];
+            for (const p of pts) {
+                exported.push({
+                    id: p.id,
+                    vector: p.vector || {},
+                    payload: p.payload || {},
+                });
+            }
+            offset = res.next_page_offset ?? null;
+            if (offset === null || pts.length === 0)
+                break;
+        }
+        return exported;
+    }
+    /**
+     * Restore previously archived dense + sparse points back into hot Qdrant on demand.
+     */
+    async restoreBlobPoints(blobId, points, collectionName = this.defaultCollection) {
+        if (!points.length)
+            return 0;
+        await this.ensureCollection(collectionName);
+        const shardKey = this.shardingMode === 'custom' ? this.computeShardKey(blobId) : undefined;
+        const batchSize = 64;
+        let restored = 0;
+        for (let i = 0; i < points.length; i += batchSize) {
+            const batch = points.slice(i, i + batchSize);
+            await axios_1.default.put(`${this.qdrantUrl}/collections/${collectionName}/points?wait=true`, {
+                points: batch,
+                ...(shardKey ? { shard_key: shardKey } : {}),
+            }, { headers: this.getHeaders(), timeout: 30000 });
+            restored += batch.length;
+        }
+        return restored;
+    }
+    async getCourseChunks(courseId, blobIds, limit = 20, collectionName = this.defaultCollection) {
+        const filter = blobIds && blobIds.length > 0
+            ? { must: [{ key: 'blob_id', match: { any: blobIds } }] }
+            : { must: [{ key: 'course_id', match: { value: courseId } }] };
+        const shardKey = blobIds ? this.computeShardKeysForBlobs(blobIds) : undefined;
+        const response = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/scroll`, {
+            filter,
+            limit,
+            with_payload: true,
+            with_vectors: false,
+            ...(shardKey ? { shard_key: shardKey } : {}),
+        }, { headers: this.getHeaders(), timeout: 15000 });
+        const res = response.data?.result;
+        const points = Array.isArray(res) ? res : res?.points || [];
+        return points.map((p) => this.mapPointToResult({ ...p, score: 1 }));
+    }
+    async getCoursChunks(courseId, limit = 10, collectionName = this.defaultCollection) {
+        return this.getCourseChunks(courseId, undefined, limit, collectionName);
+    }
+    async deleteBlobChunks(blobId, collectionName = this.defaultCollection) {
+        const shardKey = this.shardingMode === 'custom' ? this.computeShardKey(blobId) : undefined;
+        await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/delete?wait=true`, {
+            filter: { must: [{ key: 'blob_id', match: { value: blobId } }] },
+            ...(shardKey ? { shard_key: shardKey } : {}),
+        }, { headers: this.getHeaders(), timeout: 15000 });
+        return true;
+    }
+    async deleteCoursChunks(courseId, collectionName = this.defaultCollection) {
+        await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/delete?wait=true`, { filter: { must: [{ key: 'course_id', match: { value: courseId } }] } }, { headers: this.getHeaders(), timeout: 15000 });
+        return true;
+    }
+    async getEmbeddingStats(courseId, blobIds, collectionName = this.defaultCollection) {
+        const filter = blobIds && blobIds.length > 0
+            ? { must: [{ key: 'blob_id', match: { any: blobIds } }] }
+            : { must: [{ key: 'course_id', match: { value: courseId } }] };
+        const shardKey = blobIds ? this.computeShardKeysForBlobs(blobIds) : undefined;
+        const countResp = await axios_1.default.post(`${this.qdrantUrl}/collections/${collectionName}/points/count`, { filter, exact: true, ...(shardKey ? { shard_key: shardKey } : {}) }, { headers: this.getHeaders(), timeout: 10000 });
+        const totalChunks = Number(countResp.data?.result?.count || 0);
+        return {
+            courseId,
+            collection: collectionName,
+            totalChunks,
+            hasEmbeddings: totalChunks > 0,
+            blobCount: blobIds?.length ?? null,
+            quantization: this.quantizationMode,
+            shardingMode: this.shardingMode,
+        };
+    }
     async health() {
         try {
             const response = await axios_1.default.get(`${this.qdrantUrl}/readyz`, {
                 headers: this.getHeaders(),
+                timeout: 5000,
             });
-            this.logger.debug('Qdrant health check passed');
             return response.status === 200;
         }
-        catch (error) {
-            this.logger.error(`Qdrant health check failed: ${error.message}`);
+        catch {
             return false;
         }
     }
-    /**
-     * Get authorization headers
-     */
-    getHeaders() {
-        const headers = {
-            'Content-Type': 'application/json',
+    mapPointToResult(hit) {
+        const pl = hit?.payload || {};
+        return {
+            id: hit?.id?.toString(),
+            score: Number(hit?.score ?? 0),
+            blobId: pl.blob_id || '',
+            sourceName: pl.source_name || pl.pdf_name || 'Source',
+            sourceType: pl.source_type || 'pdf',
+            text: pl.text || '',
+            chunkIndex: Number(pl.chunk_index ?? -1),
+            parentIndex: Number(pl.parent_index ?? 0),
+            pageNumber: Number(pl.page_number ?? 1),
+            sectionPath: pl.section_path || 'Document',
+            hasFormula: Boolean(pl.has_formula),
+            hasTable: Boolean(pl.has_table),
+            metadata: {
+                blobId: pl.blob_id,
+                sourceName: pl.source_name,
+                sourceType: pl.source_type,
+                pageNumber: pl.page_number,
+                sectionPath: pl.section_path,
+                parentIndex: pl.parent_index,
+            },
         };
-        const apiKey = process.env.QDRANT_API_KEY;
-        if (apiKey) {
-            headers['api-key'] = apiKey;
-        }
+    }
+    getHeaders() {
+        const headers = { 'Content-Type': 'application/json' };
+        if (this.apiKey)
+            headers['api-key'] = this.apiKey;
         return headers;
     }
 };
 exports.QdrantService = QdrantService;
 exports.QdrantService = QdrantService = QdrantService_1 = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [embeddings_service_1.EmbeddingsService])
+    __metadata("design:paramtypes", [config_1.ConfigService,
+        cache_service_1.CacheService,
+        sparse_encoder_service_1.SparseEncoderService,
+        metrics_service_1.MetricsService])
 ], QdrantService);
 //# sourceMappingURL=qdrant.service.js.map

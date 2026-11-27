@@ -12,10 +12,10 @@ export class CreateCourseDto {
   @IsString()
   description?: string;
 
-  @ApiProperty({ example: '646b...userId' })
-  @IsNotEmpty()
+  @ApiPropertyOptional({ example: '646b...userId (derived from JWT automatically)' })
+  @IsOptional()
   @IsString()
-  creator: string;
+  creator?: string;
 
   @ApiPropertyOptional({ type: [Object] })
   @IsOptional()

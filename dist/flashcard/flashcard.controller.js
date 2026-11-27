@@ -22,8 +22,9 @@ let FlashcardController = class FlashcardController {
     constructor(flashcardService) {
         this.flashcardService = flashcardService;
     }
-    async create(body) {
-        return await this.flashcardService.create(body);
+    async create(body, req) {
+        const userId = req.user?.id || req.user?._id;
+        return await this.flashcardService.create({ ...body, creator: body.creator || userId });
     }
     async list(courseID, req) {
         return await this.flashcardService.list(courseID, req.user?.id);
@@ -83,8 +84,9 @@ __decorate([
     }),
     (0, swagger_1.ApiResponse)({ status: 201, description: 'Flashcards created' }),
     __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Req)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [create_flashcard_dto_1.CreateFlashcardDto]),
+    __metadata("design:paramtypes", [create_flashcard_dto_1.CreateFlashcardDto, Object]),
     __metadata("design:returntype", Promise)
 ], FlashcardController.prototype, "create", null);
 __decorate([

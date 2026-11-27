@@ -24,15 +24,17 @@ const groq_service_1 = require("../common/groq.service");
 const pdf_service_1 = require("../pdf/pdf.service");
 const cache_service_1 = require("../cache/cache.service");
 const chat_gateway_1 = require("../chat/chat.gateway");
+const mastery_service_1 = require("../rag/mastery.service");
 const mongoose_3 = __importDefault(require("mongoose"));
 let QuizService = QuizService_1 = class QuizService {
-    constructor(quizModel, courseModel, groq, pdfService, cache, chatGateway) {
+    constructor(quizModel, courseModel, groq, pdfService, cache, chatGateway, masteryService) {
         this.quizModel = quizModel;
         this.courseModel = courseModel;
         this.groq = groq;
         this.pdfService = pdfService;
         this.cache = cache;
         this.chatGateway = chatGateway;
+        this.masteryService = masteryService;
         this.logger = new common_1.Logger(QuizService_1.name);
     }
     normalize(str) {
@@ -79,6 +81,32 @@ let QuizService = QuizService_1 = class QuizService {
             quizType: quiz.quizType,
             title: quiz.title,
             questionCount: quiz.questions.length,
+        };
+    }
+    async listByCourse(courseId, quizType) {
+        const filter = { course: new mongoose_3.default.Types.ObjectId(courseId) };
+        if (quizType === 'quiz' || quizType === 'exam') {
+            filter.quizType = quizType;
+        }
+        const quizzes = await this.quizModel
+            .find(filter)
+            .select('title quizType course createdBy groupId questions.prompt attempts createdAt')
+            .sort({ createdAt: -1 })
+            .lean();
+        return {
+            message: 'success',
+            quizzes: quizzes.map((q) => ({
+                _id: q._id,
+                title: q.title,
+                quizType: q.quizType,
+                course: q.course,
+                questionCount: q.questions?.length || 0,
+                attemptCount: q.attempts?.length || 0,
+                bestPercent: q.attempts?.length
+                    ? Math.max(...q.attempts.map((a) => Number(a.percent || 0)))
+                    : null,
+                createdAt: q.createdAt,
+            })),
         };
     }
     async getQuiz(quizId) {
@@ -130,6 +158,14 @@ let QuizService = QuizService_1 = class QuizService {
             takenAt: new Date(),
         });
         await quiz.save();
+        // Feed graded question outcomes into Mastery-Aware Adaptive RAG profile
+        const masteryItems = quiz.questions.map((q, idx) => ({
+            prompt: q.prompt || '',
+            correct: Boolean(graded[idx]?.correct),
+        }));
+        await this.masteryService
+            .recordQuizOutcome(userId, quiz.course.toString(), masteryItems)
+            .catch((err) => this.logger.warn(`Mastery quiz update skipped: ${err.message}`));
         // invalidate caches
         await this.cache.del([`quiz:public:${quizId}`, `quiz:lb:${quizId}`]);
         const result = {
@@ -256,6 +292,7 @@ exports.QuizService = QuizService = QuizService_1 = __decorate([
         groq_service_1.GroqService,
         pdf_service_1.PdfService,
         cache_service_1.CacheService,
-        chat_gateway_1.ChatGateway])
+        chat_gateway_1.ChatGateway,
+        mastery_service_1.MasteryService])
 ], QuizService);
 //# sourceMappingURL=quiz.service.js.map

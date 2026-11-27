@@ -1,11 +1,10 @@
 import { Module } from '@nestjs/common';
 import { UploadController } from './upload.controller';
 import { UploadService } from './upload.service';
-import { PdfModule } from '../pdf/pdf.module';
-import { QdrantModule } from '../qdrant/qdrant.module';
+import { RagModule } from '../rag/rag.module';
 
 @Module({
-  imports: [PdfModule, QdrantModule],
+  imports: [RagModule],
   controllers: [UploadController],
   providers: [UploadService],
 })

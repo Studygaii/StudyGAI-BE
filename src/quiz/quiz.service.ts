@@ -7,6 +7,7 @@ import { GroqService } from '../common/groq.service';
 import { PdfService } from '../pdf/pdf.service';
 import { CacheService } from '../cache/cache.service';
 import { ChatGateway } from '../chat/chat.gateway';
+import { MasteryService } from '../rag/mastery.service';
 import { default as mongoose } from 'mongoose';
 
 interface GeneratedQuiz {
@@ -29,6 +30,7 @@ export class QuizService {
     private pdfService: PdfService,
     private cache: CacheService,
     private chatGateway: ChatGateway,
+    private masteryService: MasteryService,
   ) {}
 
   private normalize(str: string) {
@@ -87,6 +89,35 @@ export class QuizService {
     };
   }
 
+  async listByCourse(courseId: string, quizType?: QuizType) {
+    const filter: any = { course: new mongoose.Types.ObjectId(courseId) };
+    if (quizType === 'quiz' || quizType === 'exam') {
+      filter.quizType = quizType;
+    }
+
+    const quizzes = await this.quizModel
+      .find(filter)
+      .select('title quizType course createdBy groupId questions.prompt attempts createdAt')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return {
+      message: 'success',
+      quizzes: quizzes.map((q: any) => ({
+        _id: q._id,
+        title: q.title,
+        quizType: q.quizType,
+        course: q.course,
+        questionCount: q.questions?.length || 0,
+        attemptCount: q.attempts?.length || 0,
+        bestPercent: q.attempts?.length
+          ? Math.max(...q.attempts.map((a: any) => Number(a.percent || 0)))
+          : null,
+        createdAt: q.createdAt,
+      })),
+    };
+  }
+
   async getQuiz(quizId: string) {
     const cacheKey = `quiz:public:${quizId}`;
     const cached = await this.cache.get(cacheKey);
@@ -140,6 +171,15 @@ export class QuizService {
     } as any);
 
     await quiz.save();
+
+    // Feed graded question outcomes into Mastery-Aware Adaptive RAG profile
+    const masteryItems = quiz.questions.map((q, idx) => ({
+      prompt: (q as any).prompt || '',
+      correct: Boolean(graded[idx]?.correct),
+    }));
+    await this.masteryService
+      .recordQuizOutcome(userId, quiz.course.toString(), masteryItems)
+      .catch((err) => this.logger.warn(`Mastery quiz update skipped: ${err.message}`));
 
     // invalidate caches
     await this.cache.del([`quiz:public:${quizId}`, `quiz:lb:${quizId}`]);

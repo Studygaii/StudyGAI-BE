@@ -40,6 +40,20 @@ let CacheService = CacheService_1 = class CacheService {
             await this.client.quit();
         }
     }
+    getClient() {
+        return this.client;
+    }
+    async ping() {
+        if (!this.client || this.client.status !== 'ready')
+            return false;
+        try {
+            const pong = await this.client.ping();
+            return pong === 'PONG';
+        }
+        catch {
+            return false;
+        }
+    }
     async get(key) {
         if (!this.client)
             return null;

@@ -24,15 +24,15 @@ __decorate([
     __metadata("design:type", String)
 ], GroupChat.prototype, "description", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ type: mongoose_2.Types.ObjectId, ref: 'users', required: true }),
+    (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.ObjectId, ref: 'users', required: true }),
     __metadata("design:type", mongoose_2.Types.ObjectId)
 ], GroupChat.prototype, "creator", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ type: [{ type: mongoose_2.Types.ObjectId, ref: 'users' }], required: true }),
+    (0, mongoose_1.Prop)({ type: [{ type: mongoose_2.Schema.Types.ObjectId, ref: 'users' }], required: true }),
     __metadata("design:type", Array)
 ], GroupChat.prototype, "members", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ type: mongoose_2.Types.ObjectId, ref: 'courses', required: true }),
+    (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.ObjectId, ref: 'courses', required: true }),
     __metadata("design:type", mongoose_2.Types.ObjectId)
 ], GroupChat.prototype, "course", void 0);
 __decorate([
@@ -41,9 +41,10 @@ __decorate([
             {
                 role: { type: String, required: true },
                 content: { type: String, required: true },
-                sender: { type: mongoose_2.Types.ObjectId, ref: 'users', required: true },
+                sender: { type: mongoose_2.Schema.Types.ObjectId, ref: 'users', required: false }, // optional for AI/StudyGAI
                 senderName: { type: String },
                 date: { type: Date, default: Date.now },
+                isAI: { type: Boolean, default: false },
             },
         ],
         default: [],

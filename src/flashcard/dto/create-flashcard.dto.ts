@@ -71,12 +71,13 @@ export class CreateFlashcardDto {
   @IsString()
   title?: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: '507f1f77bcf86cd799439011',
-    description: 'User ID of the flashcard creator (from JWT token)',
+    description: 'User ID of the flashcard creator (derived from JWT automatically if omitted)',
   })
+  @IsOptional()
   @IsMongoId()
-  creator: string;
+  creator?: string;
 
   @ApiProperty({
     example: '507f1f77bcf86cd799439012',

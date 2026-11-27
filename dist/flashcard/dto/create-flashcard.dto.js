@@ -93,10 +93,11 @@ __decorate([
     __metadata("design:type", String)
 ], CreateFlashcardDto.prototype, "title", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({
+    (0, swagger_1.ApiPropertyOptional)({
         example: '507f1f77bcf86cd799439011',
-        description: 'User ID of the flashcard creator (from JWT token)',
+        description: 'User ID of the flashcard creator (derived from JWT automatically if omitted)',
     }),
+    (0, class_validator_1.IsOptional)(),
     (0, class_validator_1.IsMongoId)(),
     __metadata("design:type", String)
 ], CreateFlashcardDto.prototype, "creator", void 0);

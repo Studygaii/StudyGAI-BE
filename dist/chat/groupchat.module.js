@@ -12,6 +12,8 @@ const mongoose_1 = require("@nestjs/mongoose");
 const groupchat_controller_1 = require("./groupchat.controller");
 const groupchat_service_1 = require("./groupchat.service");
 const groupchat_schema_1 = require("../schemas/groupchat.schema");
+const user_schema_1 = require("../schemas/user.schema");
+const chat_module_1 = require("./chat.module");
 let GroupChatModule = class GroupChatModule {
 };
 exports.GroupChatModule = GroupChatModule;
@@ -20,7 +22,9 @@ exports.GroupChatModule = GroupChatModule = __decorate([
         imports: [
             mongoose_1.MongooseModule.forFeature([
                 { name: 'groupchats', schema: groupchat_schema_1.GroupChatSchema },
+                { name: 'users', schema: user_schema_1.UserSchema },
             ]),
+            (0, common_1.forwardRef)(() => chat_module_1.ChatModule),
         ],
         providers: [groupchat_service_1.GroupChatService],
         controllers: [groupchat_controller_1.GroupChatController],

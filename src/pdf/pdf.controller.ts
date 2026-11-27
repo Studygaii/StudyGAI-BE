@@ -7,12 +7,16 @@ import { ProcessPdfDto } from './dto/process-pdf.dto';
 import { SavePdfContentDto } from './dto/save-pdf-content.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { multerOptions } from '../upload/multer.options';
+import { SourceAccessService } from '../rag/source-access.service';
 
 @ApiTags('PDF')
 @ApiBearerAuth('jwt')
 @Controller('api/v1/pdf')
 export class PdfController {
-  constructor(private readonly pdfService: PdfService) {}
+  constructor(
+    private readonly pdfService: PdfService,
+    private readonly sourceAccess: SourceAccessService,
+  ) {}
 
   @Get('test')
   @UseGuards(JwtAuthGuard)
@@ -29,6 +33,7 @@ export class PdfController {
     @Body() body: ProcessPdfDto,
     @Req() req: any,
   ) {
+    await this.sourceAccess.assertCourseAccess(courseId, req.user?.id || req.user?._id);
     return await this.pdfService.processFileForCourse(courseId, body.filePath);
   }
 
@@ -54,7 +59,7 @@ export class PdfController {
     if (!file) {
       return { status: 400, error: 'No file uploaded' };
     }
-
+    await this.sourceAccess.assertCourseAccess(courseId, req.user?.id || req.user?._id);
     return await this.pdfService.processFileForCourse(courseId, file.path);
   }
 
@@ -63,6 +68,7 @@ export class PdfController {
   @ApiOperation({ summary: 'Get PDF content for a course' })
   @ApiResponse({ status: 200, description: 'PDF content retrieved' })
   async getContent(@Param('courseId') courseId: string, @Req() req: any) {
+    await this.sourceAccess.assertCourseAccess(courseId, req.user?.id || req.user?._id);
     try {
       const content = await this.pdfService.getPdfContent(courseId);
       if (!content) {
@@ -104,6 +110,7 @@ export class PdfController {
     @Body() body: SavePdfContentDto,
     @Req() req: any,
   ) {
+    await this.sourceAccess.assertCourseAccess(body.courseId, req.user?.id || req.user?._id);
     return await this.pdfService.savePdfContent(body.courseId, body.pdfText);
   }
 }

@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: studygai-vector-cold-tiering
+  namespace: studygai
+spec:
+  # Run every 6 hours to archive >30-day inactive blobs from hot Qdrant to S3/R2
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: tiering-trigger
+              image: curlimages/curl:8.10.1
+              env:
+                - name: OPS_ADMIN_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: studygai-secrets
+                      key: OPS_ADMIN_TOKEN
+              args:
+                - "-fsS"
+                - "-X"
+                - "POST"
+                - "-H"
+                - "X-Ops-Token: $(OPS_ADMIN_TOKEN)"
+                - "http://studygai-api.studygai.svc.cluster.local/api/v1/ops/tiering/archive?inactiveDays=30&limit=250"

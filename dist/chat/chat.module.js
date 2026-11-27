@@ -20,6 +20,7 @@ const jwt_1 = require("@nestjs/jwt");
 const chat_gateway_1 = require("./chat.gateway");
 const groupchat_module_1 = require("./groupchat.module");
 const qdrant_module_1 = require("../qdrant/qdrant.module");
+const rag_module_1 = require("../rag/rag.module");
 let ChatModule = class ChatModule {
 };
 exports.ChatModule = ChatModule;
@@ -34,10 +35,13 @@ exports.ChatModule = ChatModule = __decorate([
             pdf_module_1.PdfModule,
             groq_module_1.GroqModule,
             qdrant_module_1.QdrantModule,
-            jwt_1.JwtModule.register({
-                secret: process.env.JWTKey || 'your-secret-key',
+            rag_module_1.RagModule,
+            jwt_1.JwtModule.registerAsync({
+                useFactory: () => ({
+                    secret: process.env.JWTKey || 'secret',
+                }),
             }),
-            groupchat_module_1.GroupChatModule,
+            (0, common_1.forwardRef)(() => groupchat_module_1.GroupChatModule),
         ],
         controllers: [chat_controller_1.ChatController],
         providers: [chat_service_1.ChatService, chat_gateway_1.ChatGateway],

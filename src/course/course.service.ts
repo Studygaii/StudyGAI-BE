@@ -12,10 +12,13 @@ export class CourseService {
 
   async list(userId: string): Promise<IAppResponse<{ courses: any[] }>> {
     try {
+      // Exclude multi-MB legacy blobs & flashcards from dashboard listings for fast 100M-scale reads
       const courses = await this.courseModel
         .find({ creator: userId })
-        .populate('chats')
-        .sort({ createdAt: -1 });
+        .select('-pdfContent -pdfMarkdown -pdfJson -flashcards')
+        .populate('chats', '_id title createdAt')
+        .sort({ createdAt: -1 })
+        .lean();
       return {
         success: true,
         message: 'Courses retrieved successfully',
@@ -33,11 +36,14 @@ export class CourseService {
     const newCourse = new this.courseModel({
       title: body.title,
       description: body.description || '',
-      creator: authenticatedUserId,          
+      creator: authenticatedUserId,
       chats: [],
       files: body.files || [],
       date: Date.now(),
-      pdfContent: null,
+      sourceCount: 0,
+      totalTokens: 0,
+      ragVersion: 2,
+      pdfContent: '',
       pdfMarkdown: '',
       pdfJson: null,
       pdfPageCount: null,
@@ -55,10 +61,10 @@ export class CourseService {
         data: { course },
       };
     } catch (error: any) {
-      if (error.code === 11000 && error.keyPattern?.title) {
+      if (error.code === 11000 && (error.keyPattern?.title || error.keyPattern?.creator)) {
         return {
           success: false,
-          message: 'Course title already exists',
+          message: 'You already have a course with this title',
         };
       }
       return {

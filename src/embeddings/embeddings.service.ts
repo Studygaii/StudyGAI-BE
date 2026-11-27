@@ -18,25 +18,30 @@ export class EmbeddingsService {
    * Split text into overlapping chunks
    */
   chunkText(text: string, chunkSize: number = 512, overlap: number = 100): string[] {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return [];
+    if (trimmed.length <= chunkSize) return [trimmed];
+
+    const safeOverlap = Math.max(0, Math.min(overlap, Math.floor(chunkSize / 3)));
     const chunks: string[] = [];
     let start = 0;
 
-    while (start < text.length) {
-      const end = Math.min(start + chunkSize, text.length);
-      const chunk = text.substring(start, end).trim();
+    while (start < trimmed.length) {
+      const end = Math.min(start + chunkSize, trimmed.length);
+      const chunk = trimmed.substring(start, end).trim();
 
       if (chunk.length > 0) {
         chunks.push(chunk);
       }
 
-      // Move start, accounting for overlap
-      start = end - overlap;
-      if (start <= 0) {
+      if (end >= trimmed.length) {
         break;
       }
+
+      start = Math.max(start + 1, end - safeOverlap);
     }
 
-    return chunks.length > 0 ? chunks : [text];
+    return chunks.length > 0 ? chunks : [trimmed];
   }
 
   /**

@@ -3,7 +3,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { GroupChatService } from './groupchat.service';
 import { ChatService } from './chat.service';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
-import { CreateGroupChatDto, AddMemberDto, RemoveMemberDto, SendGroupMessageDto } from './dto/create-groupchat.dto';
+import { CreateGroupChatDto, AddMemberDto, RemoveMemberDto } from './dto/create-groupchat.dto';
 
 @ApiTags('Group Chat')
 @ApiBearerAuth('jwt')
@@ -17,8 +17,11 @@ export class GroupChatController {
   @Post('create')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Create a new group chat' })
-  async create(@Body() body: CreateGroupChatDto) {
-    return await this.groupChatService.create(body);
+  async create(@Body() body: CreateGroupChatDto, @Req() req: any) {
+    const userId = req.user?.id || req.user?._id;
+    const creator = body.creator || userId;
+    const members = body.members && body.members.length > 0 ? body.members : ([creator] as any);
+    return await this.groupChatService.create({ ...body, creator, members } as any);
   }
 
   @Get('list/:courseID')
@@ -65,8 +68,16 @@ export class GroupChatController {
 
   @Post(':id/send-message')
   @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: 'Send message to group chat. Use @studygai in message to trigger AI response.' })
-  @ApiBody({ schema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] } })
+  @ApiOperation({
+    summary: 'Send message to group chat. Use @studygai in message to trigger grounded RAG AI response.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+    },
+  })
   async sendMessage(
     @Param('id') groupChatId: string,
     @Body() body: { message: string },
@@ -94,9 +105,13 @@ export class GroupChatController {
     const hasMention = /@studygai/i.test(message);
     if (hasMention && courseId) {
       const query = message.replace(/@studygai\s*/gi, '').trim() || message;
-      const messages = [{ role: 'user' as const, content: query }];
-      const response = await this.chatService.sendWithContext(messages, courseId);
-      const aiContent = response?.choices?.[0]?.message?.content || response?.message || 'No response';
+      const response = await this.chatService.send(
+        [{ role: 'user', content: query }],
+        courseId,
+        { userId },
+      );
+      const aiContent =
+        response?.content || response?.choices?.[0]?.message?.content || 'No response';
 
       await this.groupChatService.addMessage(groupChatId, {
         role: 'assistant',
@@ -110,6 +125,8 @@ export class GroupChatController {
         message: 'Message sent and StudyGAI responded',
         userMessage: message,
         aiResponse: aiContent,
+        citations: response?.citations || [],
+        retrievalMeta: response?.retrievalMeta,
       };
     }
 

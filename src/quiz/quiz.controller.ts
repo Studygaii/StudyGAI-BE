@@ -1,15 +1,33 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { QuizService } from './quiz.service';
 import { GenerateQuizDto } from './dto/generate-quiz.dto';
 import { SubmitQuizDto } from './dto/submit-quiz.dto';
+import { SourceAccessService } from '../rag/source-access.service';
+import { QuizType } from '../schemas/quiz.schema';
 
 @ApiTags('Quiz')
 @ApiBearerAuth('jwt')
 @Controller('api/v1/quiz')
 export class QuizController {
-  constructor(private readonly quizService: QuizService) {}
+  constructor(
+    private readonly quizService: QuizService,
+    private readonly sourceAccess: SourceAccessService,
+  ) {}
+
+  @Get('course/:courseId')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'List all quizzes or exams generated for a course' })
+  async listByCourse(
+    @Param('courseId') courseId: string,
+    @Query('type') quizType: QuizType,
+    @Req() req: any,
+  ) {
+    const userId = req.user?.id || req.user?._id;
+    await this.sourceAccess.assertCourseAccess(courseId, userId);
+    return this.quizService.listByCourse(courseId, quizType);
+  }
 
   @Post('generate/:courseId')
   @UseGuards(JwtAuthGuard)
@@ -20,6 +38,7 @@ export class QuizController {
     @Req() req: any,
   ) {
     const userId = req.user?.id || req.user?._id;
+    await this.sourceAccess.assertCourseAccess(courseId, userId);
     return this.quizService.generateQuiz(courseId, userId, {
       numQuestions: body.numQuestions ?? 8,
       quizType: body.quizType || 'quiz',
@@ -55,4 +74,3 @@ export class QuizController {
     return this.quizService.leaderboard(quizId);
   }
 }
-

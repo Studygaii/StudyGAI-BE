@@ -5,18 +5,21 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ChatService } from './chat.service';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
 import { CreateChatDto } from './dto/create-chat.dto';
-import { SendMessagesDto } from './dto/send-messages.dto';
 import { SendMessagesWithCourseDto } from './dto/send-messages-with-course.dto';
+import { RagOrchestratorService } from '../rag/rag-orchestrator.service';
 
 @ApiTags('Chat')
 @ApiBearerAuth('jwt')
 @Controller('api/v1/chat')
 export class ChatController {
-  constructor(private readonly chatService: ChatService) {}
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly ragOrchestrator: RagOrchestratorService,
+  ) {}
 
   @Get('test')
   @UseGuards(JwtAuthGuard)
-  test(@Req() req: any) {
+  test() {
     return { msg: 'Chat Works!' };
   }
 
@@ -30,8 +33,9 @@ export class ChatController {
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Create new chat' })
   @ApiResponse({ status: 201, description: 'Chat created' })
-  async create(@Body() body: CreateChatDto) {
-    return await this.chatService.create(body);
+  async create(@Body() body: CreateChatDto, @Req() req: any) {
+    const userId = req.user?.id || req.user?._id;
+    return await this.chatService.create({ ...body, creator: body.creator || userId });
   }
 
   @Delete('delete/:id')
@@ -44,38 +48,81 @@ export class ChatController {
 
   @Post('send')
   @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: 'Send messages to Groq AI with optional PDF context' })
-  @ApiResponse({ status: 200, description: 'AI response returned' })
-  async send(@Body() body: SendMessagesWithCourseDto) {
-    return await this.chatService.send(body.messages, body.courseId);
+  @ApiOperation({
+    summary: 'Send messages with Hybrid RAG grounding, selective sources, and inline citations',
+  })
+  @ApiResponse({ status: 200, description: 'Grounded AI response with verified citations returned' })
+  async send(@Body() body: SendMessagesWithCourseDto, @Req() req: any) {
+    const userId = req.user?.id || req.user?._id;
+    return await this.chatService.send(body.messages, body.courseId, {
+      userId,
+      sourceIds: body.sourceIds,
+      mode: body.mode,
+    });
   }
 
   @Post('send-stream')
   @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: 'Send messages with streaming response' })
+  @ApiOperation({
+    summary: 'Stream grounded RAG response over SSE with citation metadata',
+  })
   @ApiResponse({ status: 200, description: 'Streaming response started' })
   async sendStream(
     @Body() body: SendMessagesWithCourseDto,
+    @Req() req: any,
     @Res() res: Response,
   ) {
     try {
-      const stream = await this.chatService.sendStream(body.messages, body.courseId);
+      const userId = req.user?.id || req.user?._id;
+      const ragStream = await this.chatService.sendStream(body.messages, body.courseId, {
+        userId,
+        sourceIds: body.sourceIds,
+        mode: body.mode,
+      });
 
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || '';
-        if (content) {
-          res.write(`data: ${JSON.stringify({ content })}\n\n`);
+      // Send retrieval strategy, adaptive/graph signals & candidate citations upfront
+      res.write(
+        `data: ${JSON.stringify({
+          type: 'meta',
+          strategy: ragStream.strategy,
+          rewrittenQuery: ragStream.rewrittenQuery,
+          sourcesSearched: ragStream.sourcesSearched,
+          graphExpandedConcepts: ragStream.graphExpandedConcepts,
+          adaptiveMastery: ragStream.adaptiveMastery,
+          citations: ragStream.citations,
+        })}\n\n`,
+      );
+
+      let fullContent = '';
+      for await (const delta of ragStream.stream) {
+        if (delta) {
+          fullContent += delta;
+          res.write(`data: ${JSON.stringify({ type: 'token', content: delta })}\n\n`);
         }
       }
 
+      // Send final verified citations marking which [n] indices appeared in the generated answer
+      const verifiedCitations = this.ragOrchestrator.markCitedReferences(
+        fullContent,
+        ragStream.citations,
+      );
+      res.write(
+        `data: ${JSON.stringify({ type: 'citations', citations: verifiedCitations })}\n\n`,
+      );
+
       res.write('data: [DONE]\n\n');
       res.end();
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+    } catch (error: any) {
+      if (!res.headersSent) {
+        res.status(error?.status || 500).json({ error: error.message });
+      } else {
+        res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+        res.end();
+      }
     }
   }
 

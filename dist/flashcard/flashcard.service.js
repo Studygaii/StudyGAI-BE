@@ -22,13 +22,19 @@ const mongoose_2 = require("mongoose");
 const mongoose_3 = __importDefault(require("mongoose"));
 const groq_service_1 = require("../common/groq.service");
 const qdrant_service_1 = require("../qdrant/qdrant.service");
+const sources_service_1 = require("../rag/sources.service");
+const mastery_service_1 = require("../rag/mastery.service");
 let FlashcardService = class FlashcardService {
     constructor(courseModel, // operate on courses
     groqService, // inject Groq service
-    qdrantService) {
+    qdrantService, // inject Qdrant service for vector search
+    sourcesService, // inject multi-source notebook content service
+    masteryService) {
         this.courseModel = courseModel;
         this.groqService = groqService;
         this.qdrantService = qdrantService;
+        this.sourcesService = sourcesService;
+        this.masteryService = masteryService;
     }
     // Add flashcards to a course (bulk create)
     async create(body) {
@@ -178,6 +184,10 @@ let FlashcardService = class FlashcardService {
                 card.stats = { ...(card.stats || {}), [uid]: userStats };
             }
             await course.save();
+            // Update per-concept learner mastery profile for Adaptive RAG
+            await this.masteryService
+                .recordFlashcardOutcome(uid, courseId, { front: card.front, tags: card.tags }, rating)
+                .catch(() => undefined);
             return { message: 'Card reviewed', cardIndex, card };
         }
         catch (error) {
@@ -247,16 +257,32 @@ let FlashcardService = class FlashcardService {
             if (course.creator.toString() !== userId) {
                 return { status: 403, error: 'Only course members can generate flashcards' };
             }
-            // Check if PDF content exists
-            if (!course.pdfContent || course.pdfContent.trim().length === 0) {
+            // Resolve source content: topic-targeted Hybrid RAG -> active multi-source notebook -> legacy course.pdfContent
+            let sourceContent = '';
+            const multiSource = await this.sourcesService.getEnabledSourcesContent(courseId, undefined, 200000);
+            if (topic && topic.trim().length > 0 && multiSource.sources.length > 0) {
+                const blobIds = multiSource.sources.map((s) => s.blobId);
+                const hits = await this.qdrantService
+                    .hybridSearch({ query: topic, blobIds, limit: 24, rerankTopK: 12 })
+                    .catch(() => []);
+                if (hits.length > 0) {
+                    sourceContent = hits
+                        .map((h) => `[${h.sourceName} | ${h.sectionPath} | p.${h.pageNumber}]\n${h.text}`)
+                        .join('\n\n');
+                }
+            }
+            if (!sourceContent) {
+                sourceContent = multiSource.combinedMarkdown || course.pdfMarkdown || course.pdfContent || '';
+            }
+            if (!sourceContent || sourceContent.trim().length === 0) {
                 return {
                     status: 400,
-                    error: 'No PDF content found. Please upload a PDF to the course first.',
+                    error: 'No source content found. Please upload documents to the course first.',
                 };
             }
             console.log(`Generating flashcards for course: ${courseId}, topic: ${topic || 'all'}`);
             // Call Groq to generate flashcards
-            const genResult = await this.groqService.generateFlashcardsFromPDF(course.pdfContent, course.title);
+            const genResult = await this.groqService.generateFlashcardsFromPDF(sourceContent, course.title);
             if (genResult.status !== 200) {
                 return genResult;
             }
@@ -345,6 +371,8 @@ exports.FlashcardService = FlashcardService = __decorate([
     __param(0, (0, mongoose_1.InjectModel)('courses')),
     __metadata("design:paramtypes", [mongoose_2.Model,
         groq_service_1.GroqService,
-        qdrant_service_1.QdrantService])
+        qdrant_service_1.QdrantService,
+        sources_service_1.SourcesService,
+        mastery_service_1.MasteryService])
 ], FlashcardService);
 //# sourceMappingURL=flashcard.service.js.map

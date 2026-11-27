@@ -13,6 +13,8 @@ import { Injectable } from '@nestjs/common';
 import { ChatService } from '../chat/chat.service';
 import { GroupChatService } from './groupchat.service';
 import { JwtService } from '@nestjs/jwt';
+import { IngestionProcessor } from '../rag/ingestion.processor';
+import { RagMode, RagOrchestratorService } from '../rag/rag-orchestrator.service';
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -28,7 +30,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   @WebSocketServer()
   server: Server;
 
-  // Map to track active rooms and their users
   private activeRooms = new Map<string, Set<string>>();
   private userSockets = new Map<string, Set<string>>();
 
@@ -36,15 +37,20 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     private chatService: ChatService,
     private groupChatService: GroupChatService,
     private jwtService: JwtService,
+    private ingestionProcessor: IngestionProcessor,
+    private ragOrchestrator: RagOrchestratorService,
   ) {}
 
   afterInit(server: Server) {
     console.log('WebSocket Gateway initialized');
+    // Broadcast live document ingestion progress to course rooms (`course:<courseId>`)
+    this.ingestionProcessor.registerStatusEmitter((courseId, payload) => {
+      server.to(`course:${courseId}`).emit('source-status', payload);
+    });
   }
 
   async handleConnection(client: AuthenticatedSocket) {
     try {
-      // Extract and verify JWT token
       const token = client.handshake.auth?.token;
       if (!token) {
         client.disconnect();
@@ -60,15 +66,13 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       client.userId = decoded.id;
       client.username = decoded.username;
 
-      // Track user sockets
       if (!this.userSockets.has(decoded.id)) {
         this.userSockets.set(decoded.id, new Set());
       }
       this.userSockets.get(decoded.id).add(client.id);
 
-      console.log(`User ${decoded.username} (${decoded.id}) connected`);
       client.emit('connected', { message: 'Connected to chat server', userId: decoded.id });
-    } catch (error) {
+    } catch (error: any) {
       console.log('Authentication failed:', error?.message || error);
       client.disconnect();
     }
@@ -76,7 +80,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
   handleDisconnect(client: AuthenticatedSocket) {
     if (client.userId) {
-      // Remove from userSockets map
       const userSockets = this.userSockets.get(client.userId);
       if (userSockets) {
         userSockets.delete(client.id);
@@ -85,7 +88,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         }
       }
 
-      // Remove from all activeRooms and notify rooms
       for (const [roomId, users] of this.activeRooms.entries()) {
         if (users.has(client.userId)) {
           users.delete(client.userId);
@@ -99,22 +101,15 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
           }
         }
       }
-
-      console.log(`User ${client.username} (${client.userId}) disconnected`);
-    } else {
-      console.log(`An unauthenticated socket disconnected: ${client.id}`);
     }
   }
 
-  // Join a chat room (1:1 or group)
   @SubscribeMessage('join-room')
   handleJoinRoom(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { roomId: string; userName: string },
   ) {
     const { roomId, userName } = data;
-
-    // Ensure authenticated
     if (!client.userId) {
       client.disconnect();
       return;
@@ -127,31 +122,40 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
     this.activeRooms.get(roomId).add(client.userId);
 
-    // Notify others in the room
     this.server.to(roomId).emit('user-joined', {
       userId: client.userId,
       userName,
       timestamp: new Date(),
       activeUsers: Array.from(this.activeRooms.get(roomId) || []),
     });
-
-    console.log(`User ${client.username} joined room ${roomId}`);
   }
 
-  // Send message in a room (1:1 chat or group chat)
+  /** Subscribe to live ingestion progress updates for a course notebook */
+  @SubscribeMessage('join-course')
+  handleJoinCourse(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { courseId: string },
+  ) {
+    if (!client.userId || !data?.courseId) return;
+    client.join(`course:${data.courseId}`);
+  }
+
   @SubscribeMessage('send-message')
   async handleSendMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: {
+    @MessageBody()
+    data: {
       roomId: string;
       message: string;
       chatId?: string;
       groupChatId?: string;
       isGroupChat?: boolean;
       courseId?: string;
+      sourceIds?: string[];
+      mode?: RagMode;
     },
   ) {
-    const { roomId, message, chatId, groupChatId, isGroupChat, courseId } = data;
+    const { roomId, message, chatId, groupChatId, isGroupChat, courseId, sourceIds, mode } = data;
 
     const messagePayload = {
       userId: client.userId,
@@ -163,10 +167,8 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       isAI: false,
     };
 
-    // Broadcast message to room
     this.server.to(roomId).emit('message', messagePayload);
 
-    // Save to group chat database
     if (isGroupChat && groupChatId) {
       try {
         await this.groupChatService.addMessage(groupChatId, {
@@ -180,18 +182,27 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         console.error('Error saving group chat message:', error);
       }
 
-      // Check for @studygai mention - trigger AI response
+      // Check for @studygai mention -> route directly through Hybrid RAG Orchestrator (fixes prior stripped-mention bug!)
       const hasMention = /@studygai/i.test(message);
       if (hasMention && courseId) {
         try {
-          const messages = [{ role: 'user' as const, content: message.replace(/@studygai\s*/gi, '').trim() || message }];
-          const response = await this.chatService.sendWithContext(messages, courseId);
-          const aiContent = response?.choices?.[0]?.message?.content || response?.message || 'I could not generate a response.';
+          const query = message.replace(/@studygai\s*/gi, '').trim() || message;
+          const response = await this.chatService.send([{ role: 'user', content: query }], courseId, {
+            userId: client.userId,
+            sourceIds,
+            mode,
+          });
+          const aiContent =
+            response?.content ||
+            response?.choices?.[0]?.message?.content ||
+            'I could not generate a response.';
 
           const aiPayload = {
             userId: 'studygai',
             userName: 'StudyGAI',
             message: aiContent,
+            citations: response?.citations || [],
+            retrievalMeta: response?.retrievalMeta,
             roomId,
             timestamp: new Date(),
             isAI: true,
@@ -231,37 +242,42 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
-  // Send AI response (uses @studygai context when courseId provided)
   @SubscribeMessage('send-ai-message')
   async handleAIMessage(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: {
+    @MessageBody()
+    data: {
       roomId: string;
       messages: Array<{ role: string; content: string }>;
       courseId?: string;
       chatId?: string;
       groupChatId?: string;
+      sourceIds?: string[];
+      mode?: RagMode;
     },
   ) {
-    const { roomId, messages, courseId, chatId, groupChatId } = data;
+    const { roomId, messages, courseId, chatId, groupChatId, sourceIds, mode } = data;
 
     try {
-      // Use sendWithContext for @studygai vector search when courseId provided
-      const response = await this.chatService.sendWithContext(messages, courseId);
+      const response = await this.chatService.send(messages, courseId, {
+        userId: client.userId,
+        sourceIds,
+        mode,
+      });
 
       const aiMessage = {
         userId: 'studygai',
         userName: 'StudyGAI',
-        message: response?.choices?.[0]?.message?.content || response?.message || 'No response',
+        message: response?.content || response?.choices?.[0]?.message?.content || 'No response',
+        citations: response?.citations || [],
+        retrievalMeta: response?.retrievalMeta,
         roomId,
         timestamp: new Date(),
         isAI: true,
       };
 
-      // Broadcast AI response
       this.server.to(roomId).emit('ai-message', aiMessage);
 
-      // Save to database
       if (groupChatId) {
         await this.groupChatService.addMessage(groupChatId, {
           role: 'assistant',
@@ -277,7 +293,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
           date: new Date(),
         });
       }
-    } catch (error) {
+    } catch (error: any) {
       this.server.to(roomId).emit('error', {
         message: 'Failed to get AI response',
         error: error.message,
@@ -285,7 +301,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
-  // Typing indicator
   @SubscribeMessage('typing')
   handleTyping(
     @ConnectedSocket() client: AuthenticatedSocket,
@@ -299,7 +314,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     });
   }
 
-  // Leave room
   @SubscribeMessage('leave-room')
   handleLeaveRoom(
     @ConnectedSocket() client: AuthenticatedSocket,
@@ -323,25 +337,36 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     });
   }
 
-  // Stream AI response
   @SubscribeMessage('send-ai-stream')
   async handleAIStream(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: {
+    @MessageBody()
+    data: {
       roomId: string;
       messages: Array<{ role: string; content: string }>;
       courseId?: string;
       chatId?: string;
+      sourceIds?: string[];
+      mode?: RagMode;
     },
   ) {
-    const { roomId, messages, courseId, chatId } = data;
+    const { roomId, messages, courseId, chatId, sourceIds, mode } = data;
 
     try {
-      const stream = await this.chatService.sendStream(messages, courseId);
+      const ragStream = await this.chatService.sendStream(messages, courseId, {
+        userId: client.userId,
+        sourceIds,
+        mode,
+      });
+
+      this.server.to(roomId).emit('ai-stream-meta', {
+        strategy: ragStream.strategy,
+        citations: ragStream.citations,
+        timestamp: new Date(),
+      });
 
       let fullContent = '';
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || '';
+      for await (const content of ragStream.stream) {
         if (content) {
           fullContent += content;
           this.server.to(roomId).emit('ai-stream-chunk', {
@@ -351,7 +376,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         }
       }
 
-      // Save full message to database
       if (chatId) {
         await this.chatService.addMessageToChat(chatId, {
           role: 'assistant',
@@ -360,10 +384,16 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         });
       }
 
+      const verifiedCitations = this.ragOrchestrator.markCitedReferences(
+        fullContent,
+        ragStream.citations,
+      );
+
       this.server.to(roomId).emit('ai-stream-done', {
+        citations: verifiedCitations,
         timestamp: new Date(),
       });
-    } catch (error) {
+    } catch (error: any) {
       this.server.to(roomId).emit('error', {
         message: 'Failed to stream AI response',
         error: error.message,
@@ -371,7 +401,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }
   }
 
-  // Get active users in room
   @SubscribeMessage('get-active-users')
   handleGetActiveUsers(
     @ConnectedSocket() client: AuthenticatedSocket,

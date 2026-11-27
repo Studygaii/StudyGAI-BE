@@ -14,6 +14,7 @@ const flashcard_service_1 = require("./flashcard.service");
 const course_schema_1 = require("../schemas/course.schema");
 const groq_module_1 = require("../common/groq.module");
 const qdrant_module_1 = require("../qdrant/qdrant.module");
+const rag_module_1 = require("../rag/rag.module");
 let FlashcardModule = class FlashcardModule {
 };
 exports.FlashcardModule = FlashcardModule;
@@ -25,6 +26,7 @@ exports.FlashcardModule = FlashcardModule = __decorate([
             ]),
             groq_module_1.GroqModule, // add Groq for flashcard generation
             qdrant_module_1.QdrantModule, // add Qdrant for vector search context
+            rag_module_1.RagModule, // multi-source content retrieval
         ],
         providers: [flashcard_service_1.FlashcardService],
         controllers: [flashcard_controller_1.FlashcardController],

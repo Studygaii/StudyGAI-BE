@@ -23,10 +23,13 @@ let CourseService = class CourseService {
     }
     async list(userId) {
         try {
+            // Exclude multi-MB legacy blobs & flashcards from dashboard listings for fast 100M-scale reads
             const courses = await this.courseModel
                 .find({ creator: userId })
-                .populate('chats')
-                .sort({ createdAt: -1 });
+                .select('-pdfContent -pdfMarkdown -pdfJson -flashcards')
+                .populate('chats', '_id title createdAt')
+                .sort({ createdAt: -1 })
+                .lean();
             return {
                 success: true,
                 message: 'Courses retrieved successfully',
@@ -48,7 +51,10 @@ let CourseService = class CourseService {
             chats: [],
             files: body.files || [],
             date: Date.now(),
-            pdfContent: null,
+            sourceCount: 0,
+            totalTokens: 0,
+            ragVersion: 2,
+            pdfContent: '',
             pdfMarkdown: '',
             pdfJson: null,
             pdfPageCount: null,
@@ -66,10 +72,10 @@ let CourseService = class CourseService {
             };
         }
         catch (error) {
-            if (error.code === 11000 && error.keyPattern?.title) {
+            if (error.code === 11000 && (error.keyPattern?.title || error.keyPattern?.creator)) {
                 return {
                     success: false,
-                    message: 'Course title already exists',
+                    message: 'You already have a course with this title',
                 };
             }
             return {

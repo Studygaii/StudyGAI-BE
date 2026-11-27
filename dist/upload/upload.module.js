@@ -10,14 +10,13 @@ exports.UploadModule = void 0;
 const common_1 = require("@nestjs/common");
 const upload_controller_1 = require("./upload.controller");
 const upload_service_1 = require("./upload.service");
-const pdf_module_1 = require("../pdf/pdf.module");
-const qdrant_module_1 = require("../qdrant/qdrant.module");
+const rag_module_1 = require("../rag/rag.module");
 let UploadModule = class UploadModule {
 };
 exports.UploadModule = UploadModule;
 exports.UploadModule = UploadModule = __decorate([
     (0, common_1.Module)({
-        imports: [pdf_module_1.PdfModule, qdrant_module_1.QdrantModule],
+        imports: [rag_module_1.RagModule],
         controllers: [upload_controller_1.UploadController],
         providers: [upload_service_1.UploadService],
     })
