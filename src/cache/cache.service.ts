@@ -28,6 +28,20 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  getClient(): Redis | null {
+    return this.client;
+  }
+
+  async ping(): Promise<boolean> {
+    if (!this.client || this.client.status !== 'ready') return false;
+    try {
+      const pong = await this.client.ping();
+      return pong === 'PONG';
+    } catch {
+      return false;
+    }
+  }
+
   async get<T = any>(key: string): Promise<T | null> {
     if (!this.client) return null;
     const raw = await this.client.get(key);

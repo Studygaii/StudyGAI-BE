@@ -16,7 +16,7 @@ const course_schema_1 = require("../schemas/course.schema");
 const docling_module_1 = require("../docling/docling.module");
 const qdrant_module_1 = require("../qdrant/qdrant.module");
 const cache_module_1 = require("../cache/cache.module");
-//import { CourseSchema } from '../courses/schemas/course.schema';
+const rag_module_1 = require("../rag/rag.module");
 let PdfModule = class PdfModule {
 };
 exports.PdfModule = PdfModule;
@@ -26,6 +26,7 @@ exports.PdfModule = PdfModule = __decorate([
             docling_module_1.DoclingModule,
             qdrant_module_1.QdrantModule,
             cache_module_1.CacheModule,
+            rag_module_1.RagModule,
             mongoose_1.MongooseModule.forFeature([
                 { name: 'courses', schema: course_schema_1.CourseSchema },
             ]),

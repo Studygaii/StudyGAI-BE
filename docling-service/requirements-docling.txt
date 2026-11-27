@@ -1,0 +1,2 @@
+# Optional heavy ML layout parser (install with --build-arg INSTALL_DOCLING=true for GPU/production builds)
+docling>=2.0.0

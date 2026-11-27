@@ -19,12 +19,20 @@ const jwt_auth_guard_1 = require("../auth/jwt-auth.guard");
 const quiz_service_1 = require("./quiz.service");
 const generate_quiz_dto_1 = require("./dto/generate-quiz.dto");
 const submit_quiz_dto_1 = require("./dto/submit-quiz.dto");
+const source_access_service_1 = require("../rag/source-access.service");
 let QuizController = class QuizController {
-    constructor(quizService) {
+    constructor(quizService, sourceAccess) {
         this.quizService = quizService;
+        this.sourceAccess = sourceAccess;
+    }
+    async listByCourse(courseId, quizType, req) {
+        const userId = req.user?.id || req.user?._id;
+        await this.sourceAccess.assertCourseAccess(courseId, userId);
+        return this.quizService.listByCourse(courseId, quizType);
     }
     async generate(courseId, body, req) {
         const userId = req.user?.id || req.user?._id;
+        await this.sourceAccess.assertCourseAccess(courseId, userId);
         return this.quizService.generateQuiz(courseId, userId, {
             numQuestions: body.numQuestions ?? 8,
             quizType: body.quizType || 'quiz',
@@ -44,6 +52,17 @@ let QuizController = class QuizController {
     }
 };
 exports.QuizController = QuizController;
+__decorate([
+    (0, common_1.Get)('course/:courseId'),
+    (0, common_1.UseGuards)(jwt_auth_guard_1.JwtAuthGuard),
+    (0, swagger_1.ApiOperation)({ summary: 'List all quizzes or exams generated for a course' }),
+    __param(0, (0, common_1.Param)('courseId')),
+    __param(1, (0, common_1.Query)('type')),
+    __param(2, (0, common_1.Req)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String, Object]),
+    __metadata("design:returntype", Promise)
+], QuizController.prototype, "listByCourse", null);
 __decorate([
     (0, common_1.Post)('generate/:courseId'),
     (0, common_1.UseGuards)(jwt_auth_guard_1.JwtAuthGuard),
@@ -89,6 +108,7 @@ exports.QuizController = QuizController = __decorate([
     (0, swagger_1.ApiTags)('Quiz'),
     (0, swagger_1.ApiBearerAuth)('jwt'),
     (0, common_1.Controller)('api/v1/quiz'),
-    __metadata("design:paramtypes", [quiz_service_1.QuizService])
+    __metadata("design:paramtypes", [quiz_service_1.QuizService,
+        source_access_service_1.SourceAccessService])
 ], QuizController);
 //# sourceMappingURL=quiz.controller.js.map

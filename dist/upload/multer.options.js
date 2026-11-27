@@ -13,8 +13,8 @@ exports.multerOptions = {
         },
     }),
     fileFilter: (req, file, callback) => {
-        if (!file.originalname.match(/\.(pdf|doc|docx|txt|ppt|pptx|md|markdown)$/i)) {
-            return callback(new Error('Only document files are allowed!'), false);
+        if (!file.originalname.match(/\.(pdf|doc|docx|txt|ppt|pptx|md|markdown|png|jpg|jpeg|webp)$/i)) {
+            return callback(new Error('Only document and image files (PDF, DOC, DOCX, TXT, PPT, PPTX, MD, PNG, JPG, JPEG, WEBP) are allowed!'), false);
         }
         callback(null, true);
     },

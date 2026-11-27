@@ -5,7 +5,7 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
-    command: 
+    command:
       - "--logpath=/dev/null"
       - "--quiet"
     restart: unless-stopped
@@ -13,60 +13,93 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
     restart: unless-stopped
 
   qdrant:
     image: qdrant/qdrant:latest
     ports:
       - "6333:6333"
+      - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
-      QDRANT_API_KEY: qdrant_key_secret
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-qdrant_key_secret}
     restart: unless-stopped
 
-  # docling service commented out for now - using fallback PDF chunking in Node.js
-  # docling:
-  #   build:
-  #     context: ./docling-service
-  #   ports:
-  #     - "5000:5000"
-  #   environment:
-  #     HOST: 0.0.0.0
-  #     PORT: 5000
-  #     LOG_LEVEL: WARNING
-  #     QDRANT_URL: http://qdrant:6333
-  #   depends_on:
-  #     - qdrant
-  #   restart: unless-stopped
+  minio:
+    image: pgsty/silo:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  rag-worker:
+    build:
+      context: ./docling-service
+    ports:
+      - "5000:5000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5000
+      LOG_LEVEL: INFO
+      RAG_PROFILE: ${RAG_PROFILE:-cpu}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-qdrant_key_secret}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-source_chunks}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      RERANKER_MODEL: ${RERANKER_MODEL:-ms-marco-MiniLM-L-12-v2}
+      VECTOR_DIM: ${VECTOR_DIM:-384}
+    depends_on:
+      - qdrant
+    restart: unless-stopped
 
   sage-be:
     build:
       context: .
     ports:
-      - "4000:4000"
+      - "${API_HOST_PORT:-4001}:4001"
     env_file: .env
     environment:
       NODE_ENV: production
-      PORT: 4000
+      PORT: 4001
       mongoURI: mongodb://mongo:27017/SAGE
-      DOCLING_SERVICE_URL: http://docling:5000
+      RAG_WORKER_URL: http://rag-worker:5000
+      DOCLING_SERVICE_URL: http://rag-worker:5000
       REDIS_URL: redis://redis:6379
+      ENABLE_BULLMQ: "true"
       QDRANT_URL: http://qdrant:6333
-      QDRANT_API_KEY: qdrant_key_secret
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-qdrant_key_secret}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-source_chunks}
+      RAG_PROFILE: ${RAG_PROFILE:-cpu}
+      VECTOR_DIM: ${VECTOR_DIM:-384}
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ${S3_BUCKET:-studygai-sources}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      S3_FORCE_PATH_STYLE: "true"
       NODE_OPTIONS: "--max-old-space-size=2048"
     depends_on:
       - mongo
+      - redis
       - qdrant
+      - minio
+      - rag-worker
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 2.5G
-        reservations:
-          memory: 2G
 
 volumes:
   mongo_data:
+  redis_data:
   qdrant_data:
+  minio_data:

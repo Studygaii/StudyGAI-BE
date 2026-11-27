@@ -11,6 +11,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { ChatGateway } from './chat.gateway';
 import { GroupChatModule } from './groupchat.module';
 import { QdrantModule } from '../qdrant/qdrant.module';
+import { RagModule } from '../rag/rag.module';
 
 @Module({
   imports: [
@@ -22,8 +23,11 @@ import { QdrantModule } from '../qdrant/qdrant.module';
     PdfModule,
     GroqModule,
     QdrantModule,
-    JwtModule.register({
-      secret: process.env.JWTKey || 'your-secret-key',
+    RagModule,
+    JwtModule.registerAsync({
+      useFactory: () => ({
+        secret: process.env.JWTKey || 'secret',
+      }),
     }),
     forwardRef(() => GroupChatModule),
   ],

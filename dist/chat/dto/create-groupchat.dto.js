@@ -24,10 +24,12 @@ __decorate([
     __metadata("design:type", String)
 ], CreateGroupChatDto.prototype, "description", void 0);
 __decorate([
+    (0, class_validator_1.IsOptional)(),
     (0, class_validator_1.IsMongoId)(),
     __metadata("design:type", String)
 ], CreateGroupChatDto.prototype, "creator", void 0);
 __decorate([
+    (0, class_validator_1.IsOptional)(),
     (0, class_validator_1.IsArray)(),
     (0, class_validator_1.IsMongoId)({ each: true }),
     __metadata("design:type", Array)

@@ -1,494 +1,457 @@
 """
-Docling Document Processing Service
-Advanced PDF processing with:
-- Mathematical formula extraction (LaTeX preservation)
-- Image extraction and storage
-- Table detection and extraction
-- Vector embeddings for semantic search
-- Image OCR (pytesseract) for PNG, JPG, JPEG, WEBP
+StudyGAI RAG Document Processing, Hybrid Embedding & Reranking Microservice.
+
+Endpoints:
+- GET  /health           -> Service health + capabilities
+- GET  /info             -> Active embedding/reranker/parser profile
+- POST /ingest/file      -> Single-pass parse + parent-child chunk + hybrid embed + Qdrant upsert
+- POST /ingest/url       -> SSRF-safe web scraping + chunk + hybrid embed + Qdrant upsert
+- POST /ingest/youtube   -> Timestamped YouTube transcript + chunk + hybrid embed + Qdrant upsert
+- POST /ingest/text      -> Raw notes / extracted text + chunk + hybrid embed + Qdrant upsert
+- POST /embed/query      -> Dense + Sparse query embeddings (called by NestJS & cached in Redis)
+- POST /rerank           -> Cross-encoder reranking of candidate passages
+- POST /search/hybrid    -> Full Hybrid RRF + Rerank search endpoint
+- DELETE /blobs/{blob_id}-> Remove all vectors for a deduplicated blob
+
+Legacy compatibility endpoints preserved:
+- POST /convert-pdf, /convert-docx, /convert-image, /embed-pdf
 """
 
-from fastapi import FastAPI, File, UploadFile, Query
-from fastapi.responses import JSONResponse
+from __future__ import annotations
+
+import logging
 import os
 import tempfile
-import logging
-from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
 
-try:
-    from docling.document_converter import DocumentConverter
-    from docling.datastructures import ConvertedDocument
-except ImportError:
-    DocumentConverter = None
-    ConvertedDocument = None
+from fastapi import FastAPI, File, Query, UploadFile
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-try:
-    import pytesseract
-    from PIL import Image
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-    pytesseract = None
-    Image = None
-
+from chunker import build_parent_child_chunks
 from embeddings import get_embeddings_manager
+from parsers import (
+    get_capabilities,
+    parse_file,
+    parse_image_ocr,
+    parse_web_url,
+    parse_youtube_transcript,
+)
 
-# Image extensions supported for OCR
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp'}
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("studygai-rag-worker")
 
-logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
-logger = logging.getLogger(__name__)
+app = FastAPI(title="StudyGAI RAG Worker", version="3.0.0")
 
-app = FastAPI(title="Docling Service", version="2.0.0")
-
-# Initialize embeddings manager
 try:
-    logger.info("========== Initializing Embeddings Manager ==========")
     embeddings_mgr = get_embeddings_manager()
-    logger.info("✓ Embeddings manager initialized")
-    logger.info("Ensuring 'pdf_chunks' collection exists...")
-    embeddings_mgr.ensure_collection('pdf_chunks')
-    logger.info("✓ pdf_chunks collection ensured")
-    logger.info("========== Embeddings System Ready ==========")
-except Exception as e:
-    logger.error(f"✗ Failed to initialize embeddings manager: {str(e)}", exc_info=True)
-    logger.warning("Continuing without vector support.")
+    try:
+        embeddings_mgr.ensure_collection()
+    except Exception as q_exc:
+        logger.warning(f"Qdrant not reachable at startup ({q_exc}); will ensure collection on first write.")
+except Exception as exc:
+    logger.error(f"Embeddings manager initialization error: {exc}", exc_info=True)
     embeddings_mgr = None
 
 
-@app.get('/health')
-async def health_check():
-    """Health check endpoint"""
-    docling_available = DocumentConverter is not None
-    return {
-        "status": "ok",
-        "service": "docling",
-        "version": "2.0.0",
-        "docling_available": docling_available,
-    }
+# -------------------- Request Schemas --------------------
+
+class IngestUrlRequest(BaseModel):
+    url: str
+    blob_id: str
+    course_id: Optional[str] = None
+    source_name: Optional[str] = None
 
 
-@app.get('/info')
-async def info():
-    """Service information"""
-    caps = [
-        "pdf_to_markdown",
-        "image_extraction",
-        "formula_extraction",
-        "table_detection",
-        "latex_preservation",
-        "vector_embeddings",
-    ]
-    if OCR_AVAILABLE:
-        caps.append("image_ocr")
-    return {
-        "service": "docling",
-        "version": "2.0.0",
-        "capabilities": caps,
-        "ocr_available": OCR_AVAILABLE,
-    }
+class IngestYoutubeRequest(BaseModel):
+    url: str
+    blob_id: str
+    course_id: Optional[str] = None
+    languages: Optional[List[str]] = None
 
+
+class IngestTextRequest(BaseModel):
+    text: str
+    blob_id: str
+    source_name: str = "Note"
+    source_type: str = "note"
+    course_id: Optional[str] = None
+
+
+class EmbedQueryRequest(BaseModel):
+    query: str
+
+
+class RerankCandidate(BaseModel):
+    id: Any
+    text: str
+    score: float = 0.0
+
+
+class RerankRequestBody(BaseModel):
+    query: str
+    documents: List[RerankCandidate]
+    top_k: int = Field(default=8, ge=1, le=50)
+
+
+class HybridSearchRequest(BaseModel):
+    query: str
+    blob_ids: Optional[List[str]] = None
+    course_id: Optional[str] = None
+    limit: int = Field(default=24, ge=1, le=100)
+    rerank_top_k: int = Field(default=8, ge=1, le=30)
+
+
+# -------------------- Helpers --------------------
 
 async def _save_tmp(file: UploadFile) -> str:
-    """Save uploaded file to temporary location"""
-    suffix = os.path.splitext(file.filename)[1] or '.bin'
+    suffix = os.path.splitext(file.filename or "")[1] or ".bin"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
         contents = await file.read()
         f.write(contents)
         return f.name
 
 
-def _extract_formulas_and_images(doc: ConvertedDocument) -> Dict[str, Any]:
-    """
-    Extract mathematical formulas and images from document.
-    
-    Returns:
-        Dictionary with formulas and image metadata
-    """
-    formulas = []
-    images = []
-    
-    try:
-        # Extract from document structure
-        if hasattr(doc, 'document') and hasattr(doc.document, 'blocks'):
-            for block_idx, block in enumerate(doc.document.blocks):
-                # Extract formulas (usually in MathBlock or similar)
-                if hasattr(block, 'children'):
-                    for child in block.children:
-                        if hasattr(child, 'type') and 'math' in str(child.type).lower():
-                            formula_data = {
-                                'block_index': block_idx,
-                                'latex': str(child) if hasattr(child, 'to_latex') else str(child),
-                                'type': 'inline' if 'inline' in str(child.type).lower() else 'display'
-                            }
-                            formulas.append(formula_data)
-                
-                # Extract images (usually in ImageBlock or similar)
-                if hasattr(block, 'type') and 'image' in str(block.type).lower():
-                    image_data = {
-                        'block_index': block_idx,
-                        'description': getattr(block, 'alt_text', 'Image'),
-                        'caption': getattr(block, 'caption', ''),
-                        'id': f"img_{block_idx}"
-                    }
-                    images.append(image_data)
-    
-    except Exception as e:
-        logger.warning(f"Error extracting formulas/images: {str(e)}")
-    
+def _index_markdown(
+    markdown: str,
+    blob_id: str,
+    source_name: str,
+    source_type: str,
+    course_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    chunked = build_parent_child_chunks(
+        markdown=markdown,
+        blob_id=blob_id,
+        source_name=source_name,
+    )
+    embedding_stats: Dict[str, Any] = {"status": "skipped", "chunks_stored": 0}
+    if embeddings_mgr is not None and chunked["children"]:
+        embedding_stats = embeddings_mgr.upsert_child_chunks(
+            children=chunked["children"],
+            blob_id=blob_id,
+            source_name=source_name,
+            source_type=source_type,
+            course_id=course_id,
+        )
     return {
-        'formulas': formulas,
-        'images': images,
+        "toc": chunked["toc"],
+        "parents": chunked["parents"],
+        "child_count": len(chunked["children"]),
+        "parent_count": len(chunked["parents"]),
+        "token_estimate": chunked["token_estimate"],
+        "embedding_stats": embedding_stats,
     }
 
 
-def _convert_document_with_docling(filepath: str) -> Dict[str, Any]:
-    """
-    Convert document using Docling library.
-    Extracts text, formulas, images, tables, and metadata.
-    
-    Args:
-        filepath: Path to PDF file
-        
-    Returns:
-        Dictionary with extracted content
-    """
-    if DocumentConverter is None:
-        raise Exception("Docling library not available. Install with: pip install docling")
-    
-    try:
-        logger.info(f"Converting document with Docling: {filepath}")
-        
-        # Initialize converter
-        converter = DocumentConverter()
-        
-        # Convert document
-        doc = converter.convert(filepath)
-        
-        logger.info(f"Document converted successfully")
-        
-        # Extract markdown (preserves structure)
-        markdown_content = doc.document.export_to_markdown() if hasattr(doc.document, 'export_to_markdown') else str(doc.document)
-        
-        # Extract formulas and images
-        formula_image_data = _extract_formulas_and_images(doc)
-        
-        # Get page count
-        page_count = len(doc.pages) if hasattr(doc, 'pages') else 1
-        
-        # Get metadata
-        metadata = {
-            'title': getattr(doc.document, 'title', 'Document'),
-            'author': getattr(doc.document, 'author', None),
-            'creation_date': getattr(doc.document, 'creation_date', None),
-            'page_count': page_count,
-        }
-        
-        return {
-            'status': 'success',
-            'markdown': markdown_content,
-            'char_count': len(markdown_content),
-            'page_count': page_count,
-            'metadata': metadata,
-            'formulas': formula_image_data['formulas'],
-            'images': formula_image_data['images'],
-            'extraction_method': 'docling'
-        }
-    
-    except Exception as e:
-        logger.error(f"Docling conversion error: {str(e)}")
-        raise
+# -------------------- Health & Info --------------------
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "ok",
+        "service": "studygai-rag-worker",
+        "version": "3.0.0",
+        "embeddings_ready": embeddings_mgr is not None and embeddings_mgr.dense_backend != "none",
+        "capabilities": get_capabilities(),
+    }
 
 
-def _ocr_image_to_text(filepath: str) -> Dict[str, Any]:
-    """
-    Extract text from image file using OCR (pytesseract).
-    
-    Args:
-        filepath: Path to image file (PNG, JPG, JPEG, WEBP)
-        
-    Returns:
-        Dictionary with extracted text and metadata
-    """
-    if not OCR_AVAILABLE:
-        raise Exception("OCR not available. Install: pip install pytesseract Pillow. Also install Tesseract: https://github.com/tesseract-ocr/tesseract")
-    
-    try:
-        logger.info(f"OCR extracting text from image: {filepath}")
-        img = Image.open(filepath)
-        text = pytesseract.image_to_string(img)
-        text = (text or "").strip()
-        char_count = len(text)
-        logger.info(f"OCR extracted {char_count} characters from image")
-        return {
-            "status": "success",
-            "markdown": text if text else "# Image\n\nNo text could be extracted from this image.",
-            "char_count": char_count,
-            "page_count": 1,
-            "extraction_method": "pytesseract_ocr",
-        }
-    except Exception as e:
-        logger.error(f"OCR extraction error: {str(e)}")
-        raise
+@app.get("/info")
+async def service_info():
+    return {
+        "service": "studygai-rag-worker",
+        "version": "3.0.0",
+        "capabilities": get_capabilities(),
+        "embeddings": embeddings_mgr.get_info() if embeddings_mgr else None,
+    }
 
 
-@app.post('/convert-image')
-async def convert_image(file: UploadFile = File(...)):
-    """
-    Extract text from image file (PNG, JPG, JPEG, WEBP) using OCR.
-    """
-    if not OCR_AVAILABLE:
-        return JSONResponse({
-            "status": "error",
-            "error": "OCR not available. Install pytesseract and Pillow, and ensure Tesseract OCR is installed on the system.",
-        }, status_code=503)
-    
+# -------------------- Unified Single-Pass Ingestion --------------------
+
+@app.post("/ingest/file")
+async def ingest_file(
+    file: UploadFile = File(...),
+    blob_id: str = Query(...),
+    course_id: Optional[str] = Query(None),
+    source_name: Optional[str] = Query(None),
+    source_type: str = Query("pdf"),
+    mode: str = Query("auto"),
+):
     tmp = None
     try:
-        logger.info(f"Received image for OCR: {file.filename}")
         tmp = await _save_tmp(file)
-        result = _ocr_image_to_text(tmp)
-        markdown = f"# {file.filename}\n\n{result['markdown']}"
-        return JSONResponse({
-            "status": "success",
-            "filename": file.filename,
-            "markdown": markdown,
-            "char_count": len(markdown),
-            "page_count": 1,
-            "extraction_method": "pytesseract_ocr",
-        })
-    except Exception as e:
-        logger.error(f"Error converting image: {str(e)}")
-        return JSONResponse({
-            "status": "error",
-            "filename": file.filename,
-            "error": str(e),
-        }, status_code=500)
+        name = source_name or file.filename or "Document"
+        parsed = parse_file(tmp, filename=name, mode=mode)
+        markdown = parsed["markdown"]
+
+        # Append formula/image summaries when extracted by Docling
+        if parsed.get("formulas"):
+            formula_lines = ["\n\n### Extracted Mathematical Formulas"]
+            for i, f in enumerate(parsed["formulas"][:50], start=1):
+                formula_lines.append(f"- Formula {i}: $${f.get('latex', '')}$$")
+            markdown += "\n".join(formula_lines)
+
+        indexed = _index_markdown(
+            markdown=markdown,
+            blob_id=blob_id,
+            source_name=name,
+            source_type=source_type,
+            course_id=course_id,
+        )
+        return JSONResponse(
+            {
+                "status": "success",
+                "blob_id": blob_id,
+                "filename": name,
+                "markdown": markdown,
+                "char_count": len(markdown),
+                "page_count": parsed.get("page_count", 1),
+                "extraction_method": parsed.get("extraction_method", "unknown"),
+                "metadata": parsed.get("metadata", {}),
+                "toc": indexed["toc"],
+                "parents": indexed["parents"],
+                "child_count": indexed["child_count"],
+                "parent_count": indexed["parent_count"],
+                "token_estimate": indexed["token_estimate"],
+                "embedding_stats": indexed["embedding_stats"],
+            }
+        )
+    except Exception as exc:
+        logger.error(f"/ingest/file error: {exc}", exc_info=True)
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
     finally:
         if tmp and os.path.exists(tmp):
             try:
                 os.unlink(tmp)
-            except Exception as e:
-                logger.warning(f"Failed to delete temp file: {str(e)}")
+            except OSError:
+                pass
 
 
-@app.post('/convert-pdf')
-async def convert_pdf(file: UploadFile = File(...)):
-    """
-    Convert PDF to structured markdown format.
-    Includes formula extraction (LaTeX) and image detection.
-    """
+@app.post("/ingest/url")
+async def ingest_url(body: IngestUrlRequest):
+    try:
+        parsed = parse_web_url(body.url)
+        name = body.source_name or parsed.get("title") or body.url
+        indexed = _index_markdown(
+            markdown=parsed["markdown"],
+            blob_id=body.blob_id,
+            source_name=name,
+            source_type="url",
+            course_id=body.course_id,
+        )
+        return JSONResponse(
+            {
+                "status": "success",
+                "blob_id": body.blob_id,
+                "title": name,
+                "url": parsed.get("url", body.url),
+                "markdown": parsed["markdown"],
+                "char_count": parsed["char_count"],
+                "page_count": parsed["page_count"],
+                "extraction_method": parsed["extraction_method"],
+                "toc": indexed["toc"],
+                "parents": indexed["parents"],
+                "child_count": indexed["child_count"],
+                "parent_count": indexed["parent_count"],
+                "token_estimate": indexed["token_estimate"],
+                "embedding_stats": indexed["embedding_stats"],
+            }
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.error(f"/ingest/url error: {exc}", exc_info=True)
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+@app.post("/ingest/youtube")
+async def ingest_youtube(body: IngestYoutubeRequest):
+    try:
+        parsed = parse_youtube_transcript(body.url, languages=body.languages)
+        name = parsed.get("title") or body.url
+        indexed = _index_markdown(
+            markdown=parsed["markdown"],
+            blob_id=body.blob_id,
+            source_name=name,
+            source_type="youtube",
+            course_id=body.course_id,
+        )
+        return JSONResponse(
+            {
+                "status": "success",
+                "blob_id": body.blob_id,
+                "video_id": parsed.get("video_id"),
+                "title": name,
+                "markdown": parsed["markdown"],
+                "char_count": parsed["char_count"],
+                "page_count": parsed["page_count"],
+                "extraction_method": parsed["extraction_method"],
+                "toc": indexed["toc"],
+                "parents": indexed["parents"],
+                "child_count": indexed["child_count"],
+                "parent_count": indexed["parent_count"],
+                "token_estimate": indexed["token_estimate"],
+                "embedding_stats": indexed["embedding_stats"],
+            }
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.error(f"/ingest/youtube error: {exc}", exc_info=True)
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+@app.post("/ingest/text")
+async def ingest_text(body: IngestTextRequest):
+    try:
+        markdown = body.text.strip()
+        if not markdown:
+            return JSONResponse({"status": "error", "error": "Text content cannot be empty"}, status_code=400)
+        if "<!-- PAGE" not in markdown:
+            markdown = f"<!-- PAGE 1 -->\n{markdown}"
+        indexed = _index_markdown(
+            markdown=markdown,
+            blob_id=body.blob_id,
+            source_name=body.source_name,
+            source_type=body.source_type,
+            course_id=body.course_id,
+        )
+        return JSONResponse(
+            {
+                "status": "success",
+                "blob_id": body.blob_id,
+                "markdown": markdown,
+                "char_count": len(markdown),
+                "page_count": 1,
+                "extraction_method": "direct_text",
+                "toc": indexed["toc"],
+                "parents": indexed["parents"],
+                "child_count": indexed["child_count"],
+                "parent_count": indexed["parent_count"],
+                "token_estimate": indexed["token_estimate"],
+                "embedding_stats": indexed["embedding_stats"],
+            }
+        )
+    except Exception as exc:
+        logger.error(f"/ingest/text error: {exc}", exc_info=True)
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+# -------------------- Query Embedding, Rerank & Hybrid Search --------------------
+
+@app.post("/embed/query")
+async def embed_query(body: EmbedQueryRequest):
+    if embeddings_mgr is None:
+        return JSONResponse({"status": "error", "error": "Embeddings manager unavailable"}, status_code=503)
+    try:
+        data = embeddings_mgr.embed_query(body.query)
+        return JSONResponse({"status": "success", **data})
+    except Exception as exc:
+        logger.error(f"/embed/query error: {exc}")
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+@app.post("/rerank")
+async def rerank_passages(body: RerankRequestBody):
+    if embeddings_mgr is None:
+        return JSONResponse({"status": "error", "error": "Reranker unavailable"}, status_code=503)
+    try:
+        docs = [d.model_dump() for d in body.documents]
+        ranked = embeddings_mgr.rerank(body.query, docs, top_k=body.top_k)
+        return JSONResponse({"status": "success", "results": ranked})
+    except Exception as exc:
+        logger.error(f"/rerank error: {exc}")
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+@app.post("/search/hybrid")
+async def search_hybrid(body: HybridSearchRequest):
+    if embeddings_mgr is None:
+        return JSONResponse({"status": "error", "error": "Search unavailable"}, status_code=503)
+    try:
+        results = embeddings_mgr.hybrid_search(
+            query=body.query,
+            blob_ids=body.blob_ids,
+            course_id=body.course_id,
+            limit=body.limit,
+            rerank_top_k=body.rerank_top_k,
+        )
+        return JSONResponse({"status": "success", "count": len(results), "results": results})
+    except Exception as exc:
+        logger.error(f"/search/hybrid error: {exc}")
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+@app.delete("/blobs/{blob_id}")
+async def delete_blob(blob_id: str):
+    if embeddings_mgr is None:
+        return JSONResponse({"status": "error", "error": "Embeddings manager unavailable"}, status_code=503)
+    try:
+        embeddings_mgr.delete_blob_chunks(blob_id)
+        return JSONResponse({"status": "success", "blob_id": blob_id})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+# -------------------- Legacy Endpoints (Backward Compatibility) --------------------
+
+@app.post("/convert-pdf")
+@app.post("/convert-docx")
+async def convert_document_legacy(file: UploadFile = File(...)):
     tmp = None
     try:
-        logger.info(f"Received file: {file.filename}")
         tmp = await _save_tmp(file)
-        
-        # Convert using Docling
-        result = _convert_document_with_docling(tmp)
-        
-        # Format response
-        markdown = f"# {file.filename}\n\n{result['markdown']}"
-        
-        return JSONResponse({
-            "status": "success",
-            "filename": file.filename,
-            "markdown": markdown,
-            "char_count": len(markdown),
-            "page_count": result['page_count'],
-            "extraction_method": result['extraction_method'],
-            "metadata": result['metadata'],
-            "formulas_found": len(result['formulas']),
-            "images_found": len(result['images']),
-            "formulas": result['formulas'][:10] if result['formulas'] else [],
-            "images_metadata": result['images'],
-        })
-    
-    except Exception as e:
-        logger.error(f"Error converting PDF: {str(e)}")
-        return JSONResponse({
-            "status": "error",
-            "filename": file.filename,
-            "error": str(e),
-        }, status_code=500)
-    
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-                logger.info(f"Cleaned up temp file: {tmp}")
-            except Exception as e:
-                logger.warning(f"Failed to delete temp file: {str(e)}")
-
-
-@app.post('/embed-pdf')
-async def embed_pdf(file: UploadFile = File(...), course_id: str = Query(None)):
-    """
-    Convert PDF or image to embeddings and store in Qdrant vector database.
-    Supports PDF, DOCX, and images (PNG, JPG, JPEG, WEBP) via OCR.
-    Includes formula and image context.
-    """
-    if not course_id:
-        return JSONResponse({
-            "status": "error",
-            "error": "course_id is required as a query parameter"
-        }, status_code=400)
-    
-    tmp = None
-    try:
-        logger.info(f"Received file for embedding: {file.filename} (course: {course_id})")
-        tmp = await _save_tmp(file)
-        
-        # Check if file is an image - use OCR instead of Docling
-        ext = os.path.splitext(file.filename)[1].lower() if file.filename else ''
-        if ext in IMAGE_EXTENSIONS and OCR_AVAILABLE:
-            result = _ocr_image_to_text(tmp)
-            text_content = result['markdown']
-            page_count = 1
-            formulas_count = 0
-            images_count = 0
-            extraction_method = "pytesseract_ocr"
-        else:
-            # Convert using Docling (PDF/DOCX)
-            result = _convert_document_with_docling(tmp)
-            text_content = result['markdown']
-            page_count = result.get('page_count', 1)
-            formulas_count = len(result.get('formulas', []))
-            images_count = len(result.get('images', []))
-            extraction_method = result.get('extraction_method', 'docling')
-        
-        # Add formula descriptions to text for better semantic search (PDF/DOCX only)
-        if extraction_method == 'docling' and result.get('formulas'):
-            formula_text = "\n\n### Formulas Found:\n"
-            for i, formula in enumerate(result['formulas']):
-                formula_text += f"- Formula {i+1}: {formula.get('latex', 'Unknown')}\n"
-            text_content = text_content + formula_text
-        
-        # Add image descriptions (PDF/DOCX only)
-        if extraction_method == 'docling' and result.get('images'):
-            image_text = "\n\n### Images Referenced:\n"
-            for img in result['images']:
-                image_text += f"- {img.get('description', 'Image')}"
-                if img.get('caption'):
-                    image_text += f": {img['caption']}"
-                image_text += "\n"
-            text_content = text_content + image_text
-        
-        # Store embeddings in Qdrant
-        try:
-            embedding_result = embeddings_mgr.store_pdf_chunks(text_content, course_id)
-            
-            logger.info(f"Successfully embedded {file.filename} for course {course_id}")
-            return JSONResponse({
+        parsed = parse_file(tmp, filename=file.filename or "document.pdf", mode="auto")
+        return JSONResponse(
+            {
                 "status": "success",
                 "filename": file.filename,
-                "course_id": course_id,
-                "page_count": page_count,
-                "extraction_method": extraction_method,
-                "formulas_found": formulas_count,
-                "images_found": images_count,
-                "embedding_stats": embedding_result,
-                "metadata": result.get('metadata', {}),
-            })
-        
-        except Exception as e:
-            logger.error(f"Failed to store embeddings: {str(e)}")
-            return JSONResponse({
-                "status": "error",
+                "markdown": parsed["markdown"],
+                "char_count": parsed["char_count"],
+                "page_count": parsed["page_count"],
+                "extraction_method": parsed["extraction_method"],
+                "metadata": parsed.get("metadata", {}),
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+@app.post("/convert-image")
+async def convert_image_legacy(file: UploadFile = File(...)):
+    tmp = None
+    try:
+        tmp = await _save_tmp(file)
+        parsed = parse_image_ocr(tmp)
+        return JSONResponse(
+            {
+                "status": "success",
                 "filename": file.filename,
-                "error": f"Embedding storage failed: {str(e)}"
-            }, status_code=500)
-    
-    except Exception as e:
-        logger.error(f"Error in embed_pdf: {str(e)}")
-        return JSONResponse({
-            "status": "error",
-            "filename": file.filename,
-            "error": str(e)
-        }, status_code=500)
-    
+                "markdown": parsed["markdown"],
+                "char_count": parsed["char_count"],
+                "page_count": 1,
+                "extraction_method": parsed["extraction_method"],
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
     finally:
         if tmp and os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except Exception as e:
-                logger.warning(f"Failed to delete temp file: {str(e)}")
+            os.unlink(tmp)
 
 
-@app.post('/extract-formulas')
-async def extract_formulas(file: UploadFile = File(...)):
-    """
-    Extract only mathematical formulas from PDF.
-    Returns LaTeX representation and locations.
-    """
-    tmp = None
-    try:
-        logger.info(f"Extracting formulas from: {file.filename}")
-        tmp = await _save_tmp(file)
-        
-        result = _convert_document_with_docling(tmp)
-        
-        return JSONResponse({
-            "status": "success",
-            "filename": file.filename,
-            "formulas_count": len(result['formulas']),
-            "formulas": result['formulas'],
-            "page_count": result['page_count'],
-        })
-    
-    except Exception as e:
-        logger.error(f"Error extracting formulas: {str(e)}")
-        return JSONResponse({
-            "status": "error",
-            "filename": file.filename,
-            "error": str(e)
-        }, status_code=500)
-    
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except Exception as e:
-                logger.warning(f"Failed to delete temp file: {str(e)}")
+@app.post("/embed-pdf")
+async def embed_pdf_legacy(file: UploadFile = File(...), course_id: str = Query(None)):
+    if not course_id:
+        return JSONResponse({"status": "error", "error": "course_id is required"}, status_code=400)
+    return await ingest_file(file=file, blob_id=course_id, course_id=course_id, source_name=file.filename)
 
 
-@app.post('/extract-images')
-async def extract_images(file: UploadFile = File(...)):
-    """
-    Extract image metadata and descriptions from PDF.
-    """
-    tmp = None
-    try:
-        logger.info(f"Extracting images from: {file.filename}")
-        tmp = await _save_tmp(file)
-        
-        result = _convert_document_with_docling(tmp)
-        
-        return JSONResponse({
-            "status": "success",
-            "filename": file.filename,
-            "images_count": len(result['images']),
-            "images": result['images'],
-            "page_count": result['page_count'],
-        })
-    
-    except Exception as e:
-        logger.error(f"Error extracting images: {str(e)}")
-        return JSONResponse({
-            "status": "error",
-            "filename": file.filename,
-            "error": str(e)
-        }, status_code=500)
-    
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except Exception as e:
-                logger.warning(f"Failed to delete temp file: {str(e)}")
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv('PORT', 5000))
-    uvicorn.run(app, host='0.0.0.0', port=port)
+
+    port = int(os.getenv("PORT", "5000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

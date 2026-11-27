@@ -7,13 +7,14 @@ import { CourseSchema } from '../schemas/course.schema';
 import { DoclingModule } from '../docling/docling.module';
 import { QdrantModule } from '../qdrant/qdrant.module';
 import { CacheModule } from '../cache/cache.module';
-//import { CourseSchema } from '../courses/schemas/course.schema';
+import { RagModule } from '../rag/rag.module';
 
 @Module({
   imports: [
     DoclingModule,
     QdrantModule,
     CacheModule,
+    RagModule,
     MongooseModule.forFeature([
       { name: 'courses', schema: CourseSchema },
     ]),

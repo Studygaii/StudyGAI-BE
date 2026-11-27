@@ -16,6 +16,8 @@ const course_schema_1 = require("../schemas/course.schema");
 const groq_module_1 = require("../common/groq.module");
 const pdf_module_1 = require("../pdf/pdf.module");
 const chat_module_1 = require("../chat/chat.module");
+const qdrant_module_1 = require("../qdrant/qdrant.module");
+const rag_module_1 = require("../rag/rag.module");
 let QuizModule = class QuizModule {
 };
 exports.QuizModule = QuizModule;
@@ -25,6 +27,8 @@ exports.QuizModule = QuizModule = __decorate([
             groq_module_1.GroqModule,
             pdf_module_1.PdfModule,
             chat_module_1.ChatModule,
+            qdrant_module_1.QdrantModule,
+            rag_module_1.RagModule,
             mongoose_1.MongooseModule.forFeature([
                 { name: 'quizzes', schema: quiz_schema_1.QuizSchema },
                 { name: 'courses', schema: course_schema_1.CourseSchema },

@@ -8,14 +8,17 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GroqModule = void 0;
 const common_1 = require("@nestjs/common");
+const config_1 = require("@nestjs/config");
 const groq_service_1 = require("./groq.service");
+const llm_service_1 = require("./llm.service");
 let GroqModule = class GroqModule {
 };
 exports.GroqModule = GroqModule;
 exports.GroqModule = GroqModule = __decorate([
     (0, common_1.Module)({
-        providers: [groq_service_1.GroqService],
-        exports: [groq_service_1.GroqService],
+        imports: [config_1.ConfigModule],
+        providers: [groq_service_1.GroqService, llm_service_1.LlmService],
+        exports: [groq_service_1.GroqService, llm_service_1.LlmService],
     })
 ], GroqModule);
 //# sourceMappingURL=groq.module.js.map

@@ -43,8 +43,9 @@ export class FlashcardController {
     },
   })
   @ApiResponse({ status: 201, description: 'Flashcards created' })
-  async create(@Body() body: CreateFlashcardDto) {
-    return await this.flashcardService.create(body);
+  async create(@Body() body: CreateFlashcardDto, @Req() req: any) {
+    const userId = req.user?.id || req.user?._id;
+    return await this.flashcardService.create({ ...body, creator: body.creator || userId });
   }
 
   @Get('list/:courseID')

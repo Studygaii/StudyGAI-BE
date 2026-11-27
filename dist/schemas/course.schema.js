@@ -16,7 +16,7 @@ let Course = class Course {
 };
 exports.Course = Course;
 __decorate([
-    (0, mongoose_1.Prop)({ required: true, unique: true }),
+    (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", String)
 ], Course.prototype, "title", void 0);
 __decorate([
@@ -24,7 +24,7 @@ __decorate([
     __metadata("design:type", String)
 ], Course.prototype, "description", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ type: mongoose_2.Types.ObjectId, ref: 'users', required: true }),
+    (0, mongoose_1.Prop)({ type: mongoose_2.Types.ObjectId, ref: 'users', required: true, index: true }),
     __metadata("design:type", mongoose_2.Types.ObjectId)
 ], Course.prototype, "creator", void 0);
 __decorate([
@@ -39,6 +39,18 @@ __decorate([
     (0, mongoose_1.Prop)({ default: Date.now }),
     __metadata("design:type", Date)
 ], Course.prototype, "date", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], Course.prototype, "sourceCount", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, default: 0 }),
+    __metadata("design:type", Number)
+], Course.prototype, "totalTokens", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, default: 2 }),
+    __metadata("design:type", Number)
+], Course.prototype, "ragVersion", void 0);
 __decorate([
     (0, mongoose_1.Prop)({ type: String, default: '' }),
     __metadata("design:type", String)
@@ -75,18 +87,15 @@ __decorate([
     (0, mongoose_1.Prop)({
         type: [
             {
-                front: { type: String, required: true }, // question / front side
-                back: { type: String, required: true }, // answer / back side
+                front: { type: String, required: true },
+                back: { type: String, required: true },
                 tags: { type: [String], default: [] },
                 creator: { type: mongoose_2.Types.ObjectId, ref: 'users', required: true },
-                // Spaced-repetition fields (per-card defaults)
-                easeFactor: { type: Number, default: 2.5 }, // Anki default
-                interval: { type: Number, default: 0 }, // in days
+                easeFactor: { type: Number, default: 2.5 },
+                interval: { type: Number, default: 0 },
                 dueDate: { type: Date, default: null },
-                // global review counters for the card
                 reviewCount: { type: Number, default: 0 },
                 lastReviewedAt: { type: Date },
-                // per-user stats map: { userId: { reviewCount, lastReviewedAt, interval, easeFactor, dueDate } }
                 stats: { type: Map, of: Object, default: {} },
                 createdAt: { type: Date, default: Date.now },
             },
@@ -99,7 +108,9 @@ exports.Course = Course = __decorate([
     (0, mongoose_1.Schema)({ timestamps: true })
 ], Course);
 exports.CourseSchema = mongoose_1.SchemaFactory.createForClass(Course);
-// pre-delete cleanup as before
+// Per-user unique course titles instead of global uniqueness
+exports.CourseSchema.index({ creator: 1, title: 1 }, { unique: true });
+// Pre-delete cleanup
 exports.CourseSchema.pre('deleteOne', { document: true, query: false }, async function (next) {
     const mongoose = require('mongoose');
     await mongoose.model('chats').deleteMany({ _id: { $in: this.chats } });

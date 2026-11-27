@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: studygai-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["sage-be:4000"]
+    # In production, configure bearer_token_file matching METRICS_BEARER_TOKEN
+
+  - job_name: qdrant
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["qdrant:6333"]
+
+  - job_name: rag-worker
+    metrics_path: /health
+    static_configs:
+      - targets: ["rag-worker:5000"]

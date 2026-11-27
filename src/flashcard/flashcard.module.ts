@@ -5,6 +5,7 @@ import { FlashcardService } from './flashcard.service';
 import { CourseSchema } from '../schemas/course.schema';
 import { GroqModule } from '../common/groq.module';
 import { QdrantModule } from '../qdrant/qdrant.module';
+import { RagModule } from '../rag/rag.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { QdrantModule } from '../qdrant/qdrant.module';
     ]),
     GroqModule, // add Groq for flashcard generation
     QdrantModule, // add Qdrant for vector search context
+    RagModule, // multi-source content retrieval
   ],
   providers: [FlashcardService],
   controllers: [FlashcardController],

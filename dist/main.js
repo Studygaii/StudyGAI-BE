@@ -41,6 +41,7 @@ const dotenv = __importStar(require("dotenv"));
 const app_module_1 = require("./app.module");
 const swagger_1 = require("@nestjs/swagger");
 const fs = __importStar(require("fs"));
+const redis_io_adapter_1 = require("./common/redis-io.adapter");
 async function bootstrap() {
     dotenv.config();
     const logger = new common_1.Logger('Bootstrap');
@@ -49,6 +50,12 @@ async function bootstrap() {
         logger.log('Created uploads directory');
     }
     const app = await core_1.NestFactory.create(app_module_1.AppModule);
+    // Graceful SIGTERM/SIGINT hooks for zero-downtime Kubernetes rolling deployments
+    app.enableShutdownHooks();
+    // Horizontal Multi-Replica Socket.IO Redis Adapter (with automatic single-node fallback)
+    const redisIoAdapter = new redis_io_adapter_1.RedisIoAdapter(app);
+    await redisIoAdapter.connectToRedis(process.env.REDIS_URL);
+    app.useWebSocketAdapter(redisIoAdapter);
     // Configure payload size limits for file uploads
     app.use(require('express').json({ limit: '50mb' }));
     app.use(require('express').urlencoded({ limit: '50mb', extended: true }));
@@ -58,15 +65,15 @@ async function bootstrap() {
         forbidNonWhitelisted: true,
     }));
     app.enableCors({
-        origin: true, // Allow all origins in development
+        origin: true,
         methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
         credentials: true,
-        allowedHeaders: 'Content-Type,Authorization,X-Requested-With',
+        allowedHeaders: 'Content-Type,Authorization,X-Requested-With,X-Request-Id,X-Ops-Token',
     });
     const config = new swagger_1.DocumentBuilder()
-        .setTitle('StudyGAI EdTech API')
-        .setDescription('AI-Powered Study Assistant API with PDF processing and chat capabilities')
-        .setVersion('1.0')
+        .setTitle('StudyGAI EdTech API (NotebookLM+ 100M-Scale RAG)')
+        .setDescription('Multi-source Hybrid RAG, GraphRAG Concept Maps, Mastery-Aware Adaptive Tutoring, 2-Host Audio Overviews & Real-Time Study Groups')
+        .setVersion('2.0')
         .addBearerAuth({
         type: 'http',
         scheme: 'bearer',
@@ -82,11 +89,10 @@ async function bootstrap() {
             persistAuthorization: true,
         },
     });
-    logger.log('Swagger UI available at /docs');
+    logger.log('Swagger UI available at /docs | Metrics at /metrics | Probes at /healthz & /readyz');
     const port = process.env.PORT || 4000;
     await app.listen(port);
-    logger.log(`SAGE Backend running on http://localhost:${port}`);
-    logger.log(`API Documentation: http://localhost:${port}/docs`);
+    logger.log(`StudyGAI Backend running on http://localhost:${port}`);
 }
 bootstrap();
 //# sourceMappingURL=main.js.map

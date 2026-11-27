@@ -55,6 +55,7 @@ const fs = __importStar(require("fs"));
 const path_1 = require("path");
 const docling_service_1 = require("../docling/docling.service");
 const cache_service_1 = require("../cache/cache.service");
+const sources_service_1 = require("../rag/sources.service");
 // Import pdf-parse as fallback
 const pdfParse = require('pdf-parse');
 // Try to require llama-parse if available
@@ -67,10 +68,11 @@ catch (e) {
     llamaParse = null;
 }
 let PdfService = PdfService_1 = class PdfService {
-    constructor(courseModel, doclingService, cache) {
+    constructor(courseModel, doclingService, cache, sourcesService) {
         this.courseModel = courseModel;
         this.doclingService = doclingService;
         this.cache = cache;
+        this.sourcesService = sourcesService;
         this.logger = new common_1.Logger(PdfService_1.name);
     }
     /**
@@ -119,6 +121,22 @@ let PdfService = PdfService_1 = class PdfService {
                     }
                 }
                 return extractedText;
+            }
+            // Image files: use Docling OCR service
+            const imageExts = ['png', 'jpg', 'jpeg', 'webp'];
+            if (imageExts.includes(ext || '')) {
+                try {
+                    const isHealthy = await this.doclingService.healthCheck();
+                    if (isHealthy) {
+                        const ocrText = await this.doclingService.convertImageToText(filePath);
+                        if (ocrText && ocrText.trim().length > 0)
+                            return ocrText;
+                    }
+                }
+                catch (err) {
+                    console.warn('Docling OCR failed:', err?.message || err);
+                }
+                throw new Error('Image OCR failed. Ensure Docling service is running with pytesseract and Tesseract OCR installed.');
             }
             // Try docx/doc using mammoth if available
             if (ext === 'docx' || ext === 'doc' || ext === 'docm') {
@@ -248,6 +266,13 @@ let PdfService = PdfService_1 = class PdfService {
             const cached = await this.cache.get(`course:pdf:${courseId}`);
             if (cached?.pdfMarkdown)
                 return cached.pdfMarkdown;
+            // Prefer active multi-source notebook content (RAG v2)
+            const multiSource = await this.sourcesService.getEnabledSourcesContent(courseId, undefined, 240000);
+            if (multiSource.combinedMarkdown && multiSource.combinedMarkdown.trim().length > 0) {
+                await this.cache.set(`course:pdf:${courseId}`, { pdfMarkdown: multiSource.combinedMarkdown }, 300);
+                return multiSource.combinedMarkdown;
+            }
+            // Backward-compatible fallback for legacy single-PDF courses
             const course = await this.courseModel
                 .findById(courseId)
                 .select('pdfContent pdfMarkdown')
@@ -281,10 +306,17 @@ let PdfService = PdfService_1 = class PdfService {
             const ext = fileName.split('.').pop()?.toLowerCase();
             // Try Docling service first for better structured output
             try {
-                this.logger.log('Attempting to use Docling service for PDF conversion');
+                this.logger.log('Attempting to use Docling service for conversion');
                 const isHealthy = await this.doclingService.healthCheck();
                 if (isHealthy) {
-                    const endpoint = ext === 'docx' ? '/convert-docx' : '/convert-pdf';
+                    const imageExts = ['png', 'jpg', 'jpeg', 'webp'];
+                    let endpoint = '/convert-pdf';
+                    if (imageExts.includes(ext || '')) {
+                        endpoint = '/convert-image';
+                    }
+                    else if (ext === 'docx' || ext === 'doc' || ext === 'docm') {
+                        endpoint = '/convert-docx';
+                    }
                     const rich = await this.doclingService.convertFileRich(filePath, endpoint);
                     pdfText = rich.markdown;
                     pdfJson = rich.json || null;
@@ -365,94 +397,13 @@ let PdfService = PdfService_1 = class PdfService {
      * Chunk PDF text and store in Qdrant (fallback if Docling service fails)
      */
     async chunkAndEmbedPdf(courseId, pdfText, chunkSize = 512, overlap = 100, qdrantService) {
-        try {
-            this.logger.log(`[chunkAndEmbedPdf] Starting for course: ${courseId}, text length: ${pdfText?.length || 0}`);
-            if (!pdfText || pdfText.trim().length === 0) {
-                this.logger.warn(`[chunkAndEmbedPdf] Empty PDF text provided`);
-                return { status: 400, message: 'Empty PDF text', error: 'No content to chunk' };
-            }
-            // Limit text to avoid memory issues - process in chunks
-            // This ensures we don't create thousands of chunk objects at once
-            const maxChunksPerBatch = 50;
-            const charLimitPerBatch = 25000; // Process 25KB at a time
-            // Determine how much text to process
-            let textToProcess = pdfText;
-            if (pdfText.length > charLimitPerBatch) {
-                textToProcess = pdfText.substring(0, charLimitPerBatch);
-                this.logger.log(`[chunkAndEmbedPdf] Processing first ${textToProcess.length} chars of ${pdfText.length} (batching)`);
-            }
-            // Split text into chunks with overlap
-            const chunks = [];
-            let start = 0;
-            while (start < textToProcess.length) {
-                const end = Math.min(start + chunkSize, textToProcess.length);
-                const chunk = textToProcess.substring(start, end).trim();
-                if (chunk.length > 0) {
-                    chunks.push(chunk);
-                }
-                // Move start position, accounting for overlap
-                start = end - overlap;
-                if (start <= 0) {
-                    break;
-                }
-                // Stop if we have too many chunks to avoid memory issues
-                if (chunks.length >= maxChunksPerBatch) {
-                    this.logger.log(`[chunkAndEmbedPdf] Reached batch limit of ${maxChunksPerBatch} chunks`);
-                    break;
-                }
-            }
-            this.logger.log(`[chunkAndEmbedPdf] Created ${chunks.length} chunks from PDF text`);
-            if (chunks.length === 0) {
-                this.logger.warn(`[chunkAndEmbedPdf] Could not create any chunks`);
-                return { status: 400, message: 'Could not create chunks', error: 'Text too short' };
-            }
-            // Store chunks in Qdrant with embeddings
-            try {
-                if (!qdrantService) {
-                    this.logger.warn(`[chunkAndEmbedPdf] No qdrantService provided, skipping storage`);
-                    return { status: 200, message: 'PDF chunked but not stored (no service)', chunked: chunks.length };
-                }
-                this.logger.log(`[chunkAndEmbedPdf] Calling storeChunksWithEmbeddings with ${chunks.length} chunks`);
-                const stats = await qdrantService.storeChunksWithEmbeddings(chunks, courseId, 'pdf_chunks');
-                this.logger.log(`[chunkAndEmbedPdf] Embedding stats: ${JSON.stringify(stats)}`);
-                if (stats.status === 'success' || stats.status === 'partial_success') {
-                    this.logger.log(`[chunkAndEmbedPdf] Successfully stored chunks - pointsStored: ${stats.pointsStored}`);
-                    return {
-                        status: 200,
-                        message: 'PDF chunked and stored successfully',
-                        chunked: chunks.length,
-                        stored: stats.pointsStored,
-                    };
-                }
-                else {
-                    this.logger.error(`[chunkAndEmbedPdf] Failed to generate embeddings: ${stats.status}`);
-                    return {
-                        status: 500,
-                        message: 'Failed to generate embeddings for chunks',
-                        chunked: chunks.length,
-                        stored: 0,
-                    };
-                }
-            }
-            catch (qdrantError) {
-                this.logger.error(`[chunkAndEmbedPdf] Qdrant error: ${qdrantError.message}`, qdrantError.stack);
-                return {
-                    status: 500,
-                    message: 'PDF chunked but failed to store in Qdrant',
-                    chunked: chunks.length,
-                    stored: 0,
-                    error: qdrantError.message,
-                };
-            }
-        }
-        catch (error) {
-            this.logger.error(`[chunkAndEmbedPdf] Unexpected error: ${error.message}`, error.stack);
-            return {
-                status: 500,
-                message: 'Failed to chunk and embed PDF',
-                error: error.message,
-            };
-        }
+        this.logger.warn('[chunkAndEmbedPdf] DEPRECATED: This method uses the disabled NestJS embeddings service');
+        this.logger.warn('[chunkAndEmbedPdf] Use Python Docling microservice instead (POST /embed-pdf)');
+        return {
+            status: 410, // 410 Gone - permanently unavailable
+            message: 'chunkAndEmbedPdf is deprecated',
+            error: 'Use Python Docling microservice POST /embed-pdf endpoint for embedding functionality',
+        };
     }
 };
 exports.PdfService = PdfService;
@@ -461,6 +412,7 @@ exports.PdfService = PdfService = PdfService_1 = __decorate([
     __param(0, (0, mongoose_1.InjectModel)('courses')),
     __metadata("design:paramtypes", [mongoose_2.Model,
         docling_service_1.DoclingService,
-        cache_service_1.CacheService])
+        cache_service_1.CacheService,
+        sources_service_1.SourcesService])
 ], PdfService);
 //# sourceMappingURL=pdf.service.js.map

@@ -9,12 +9,14 @@ export class CreateGroupChatDto {
   @IsString()
   description?: string;
 
+  @IsOptional()
   @IsMongoId()
-  creator: string;
+  creator?: string;
 
+  @IsOptional()
   @IsArray()
   @IsMongoId({ each: true })
-  members: Types.ObjectId[];
+  members?: Types.ObjectId[];
 
   @IsMongoId()
   course: string;

@@ -11,183 +11,208 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GroupChatService = void 0;
 const common_1 = require("@nestjs/common");
 const mongoose_1 = require("@nestjs/mongoose");
 const mongoose_2 = require("mongoose");
-const mongoose_3 = __importDefault(require("mongoose"));
 const MAX_GROUP_MEMBERS = 5;
+function extractId(val) {
+    if (!val)
+        return '';
+    if (typeof val === 'string')
+        return val;
+    if (val instanceof mongoose_2.Types.ObjectId)
+        return val.toString();
+    if (val._id)
+        return val._id.toString();
+    if (val.id)
+        return val.id.toString();
+    return typeof val.toString === 'function' ? val.toString() : '';
+}
 let GroupChatService = class GroupChatService {
-    constructor(groupChatModel) {
+    constructor(groupChatModel, userModel) {
         this.groupChatModel = groupChatModel;
+        this.userModel = userModel;
+    }
+    async hydrateMembers(groupChatObj) {
+        if (!groupChatObj || !Array.isArray(groupChatObj.members))
+            return groupChatObj;
+        const rawIds = groupChatObj.members
+            .filter((m) => typeof m === 'string' || m instanceof mongoose_2.Types.ObjectId || !m?.username)
+            .map((m) => extractId(m))
+            .filter((id) => mongoose_2.Types.ObjectId.isValid(id));
+        if (rawIds.length === 0)
+            return groupChatObj;
+        const users = await this.userModel
+            .find({ _id: { $in: rawIds } })
+            .select('username avatar email')
+            .lean();
+        const userMap = new Map(users.map((u) => [u._id.toString(), u]));
+        groupChatObj.members = groupChatObj.members.map((m) => {
+            if (m && typeof m === 'object' && m.username)
+                return m;
+            const id = extractId(m);
+            return userMap.get(id) || { _id: id, username: 'Member' };
+        });
+        return groupChatObj;
     }
     async create(body) {
-        const session = await mongoose_3.default.startSession();
-        session.startTransaction();
         try {
-            // Ensure members array unique and includes creator
-            const membersSet = new Set((body.members || []).map((m) => m.toString()));
-            membersSet.add(body.creator.toString());
-            const members = Array.from(membersSet);
+            // Ensure members array is unique ObjectIds and includes creator
+            const membersSet = new Set((body.members || []).map((m) => extractId(m)).filter(Boolean));
+            const creatorId = extractId(body.creator);
+            if (creatorId)
+                membersSet.add(creatorId);
+            const members = Array.from(membersSet)
+                .filter((id) => mongoose_2.Types.ObjectId.isValid(id))
+                .map((id) => new mongoose_2.Types.ObjectId(id));
             if (members.length > MAX_GROUP_MEMBERS) {
-                return { status: 400, error: `Group cannot have more than ${MAX_GROUP_MEMBERS} members` };
+                throw new common_1.BadRequestException(`Group cannot have more than ${MAX_GROUP_MEMBERS} members`);
             }
             const newGroupChat = new this.groupChatModel({
                 name: body.name,
                 description: body.description,
-                creator: body.creator,
+                creator: new mongoose_2.Types.ObjectId(creatorId),
                 members,
-                course: body.course,
+                course: new mongoose_2.Types.ObjectId(extractId(body.course)),
                 avatar: body.avatar,
                 isActive: true,
                 messages: [],
             });
-            const savedGroupChat = await newGroupChat.save({ session });
-            await session.commitTransaction();
-            session.endSession();
+            const savedGroupChat = await newGroupChat.save();
             return { message: 'success', groupChat: savedGroupChat };
         }
         catch (error) {
-            await session.abortTransaction();
-            session.endSession();
+            if (error instanceof common_1.BadRequestException)
+                throw error;
             if (error.code === 11000) {
-                return { status: 400, error: 'Duplicate group chat' };
+                throw new common_1.BadRequestException('Duplicate group chat');
             }
-            return { status: 500, error: error.message };
+            throw new common_1.BadRequestException(error.message || 'Failed to create group chat');
         }
     }
     async list(courseID, userID) {
-        try {
-            const groupChats = await this.groupChatModel
-                .find({
-                course: courseID,
-                members: userID,
-            })
-                .populate('members', 'username avatar')
-                .populate('creator', 'username')
-                .sort({ lastMessageAt: -1 });
-            return { message: 'success', groupChats };
-        }
-        catch (error) {
-            return { status: 500, error: error.message };
-        }
+        const courseFilter = mongoose_2.Types.ObjectId.isValid(courseID)
+            ? { $in: [courseID, new mongoose_2.Types.ObjectId(courseID)] }
+            : courseID;
+        const memberFilter = mongoose_2.Types.ObjectId.isValid(userID)
+            ? { $in: [userID, new mongoose_2.Types.ObjectId(userID)] }
+            : userID;
+        const groupChats = await this.groupChatModel
+            .find({
+            course: courseFilter,
+            $or: [{ members: memberFilter }, { creator: memberFilter }],
+        })
+            .populate('members', 'username avatar')
+            .populate('creator', 'username')
+            .sort({ lastMessageAt: -1, createdAt: -1 })
+            .lean();
+        const hydrated = await Promise.all(groupChats.map((gc) => this.hydrateMembers(gc)));
+        return { message: 'success', groupChats: hydrated };
     }
     async getById(id, userId) {
-        try {
-            const groupChat = await this.groupChatModel
-                .findById(id)
-                .populate('members', 'username avatar email')
-                .populate('creator', 'username')
-                .populate('messages.sender', 'username avatar');
-            if (!groupChat) {
-                return { status: 404, error: 'Group chat not found' };
-            }
-            // Verify user is a member
-            const isMember = groupChat.members.some((m) => m._id.toString() === userId);
-            if (!isMember && groupChat.creator._id.toString() !== userId) {
-                return { status: 403, error: 'Access denied' };
-            }
-            return { message: 'success', groupChat };
+        if (!mongoose_2.Types.ObjectId.isValid(id)) {
+            throw new common_1.NotFoundException('Group chat not found');
         }
-        catch (error) {
-            return { status: 500, error: error.message };
+        const groupChat = await this.groupChatModel
+            .findById(id)
+            .populate('members', 'username avatar email')
+            .populate('creator', 'username')
+            .populate('messages.sender', 'username avatar')
+            .lean();
+        if (!groupChat) {
+            throw new common_1.NotFoundException('Group chat not found');
         }
+        const normalizedUserId = extractId(userId);
+        const isMember = (groupChat.members || []).some((m) => extractId(m) === normalizedUserId);
+        const isCreator = extractId(groupChat.creator) === normalizedUserId;
+        if (!isMember && !isCreator) {
+            throw new common_1.ForbiddenException('Access denied');
+        }
+        const hydrated = await this.hydrateMembers(groupChat);
+        return { message: 'success', groupChat: hydrated };
     }
     async addMember(data) {
-        try {
-            const groupChat = await this.groupChatModel.findById(data.groupChatId);
-            if (!groupChat) {
-                return { status: 404, error: 'Group chat not found' };
-            }
-            // Prevent duplicates
-            const currentMembers = groupChat.members.map((m) => m.toString());
-            if (currentMembers.includes(data.userId.toString())) {
-                // Already member - return current state
-                const populated = await this.groupChatModel.findByIdAndUpdate(data.groupChatId, { $addToSet: { members: data.userId } }, { new: true }).populate('members', 'username avatar');
-                return { message: 'Member added successfully', groupChat: populated };
-            }
-            if (currentMembers.length >= MAX_GROUP_MEMBERS) {
-                return { status: 400, error: `Group cannot have more than ${MAX_GROUP_MEMBERS} members` };
-            }
-            const updated = await this.groupChatModel.findByIdAndUpdate(data.groupChatId, { $addToSet: { members: data.userId } }, { new: true }).populate('members', 'username avatar');
-            if (!updated) {
-                return { status: 404, error: 'Group chat not found' };
-            }
-            return { message: 'Member added successfully', groupChat: updated };
+        const groupChat = await this.groupChatModel.findById(data.groupChatId);
+        if (!groupChat) {
+            throw new common_1.NotFoundException('Group chat not found');
         }
-        catch (error) {
-            return { status: 500, error: error.message };
+        const memberObjId = new mongoose_2.Types.ObjectId(data.userId.toString());
+        const currentMembers = groupChat.members.map((m) => extractId(m));
+        if (currentMembers.includes(data.userId.toString())) {
+            const populated = await this.groupChatModel
+                .findById(data.groupChatId)
+                .populate('members', 'username avatar')
+                .lean();
+            return { message: 'Member added successfully', groupChat: await this.hydrateMembers(populated) };
         }
+        if (currentMembers.length >= MAX_GROUP_MEMBERS) {
+            throw new common_1.BadRequestException(`Group cannot have more than ${MAX_GROUP_MEMBERS} members`);
+        }
+        const updated = await this.groupChatModel
+            .findByIdAndUpdate(data.groupChatId, { $addToSet: { members: memberObjId } }, { new: true })
+            .populate('members', 'username avatar')
+            .lean();
+        if (!updated) {
+            throw new common_1.NotFoundException('Group chat not found');
+        }
+        return { message: 'Member added successfully', groupChat: await this.hydrateMembers(updated) };
     }
     async removeMember(data) {
-        try {
-            const groupChat = await this.groupChatModel.findByIdAndUpdate(data.groupChatId, { $pull: { members: data.userId } }, { new: true }).populate('members', 'username avatar');
-            if (!groupChat) {
-                return { status: 404, error: 'Group chat not found' };
-            }
-            return { message: 'Member removed successfully', groupChat };
+        const pullValues = [data.userId.toString()];
+        if (mongoose_2.Types.ObjectId.isValid(data.userId.toString())) {
+            pullValues.push(new mongoose_2.Types.ObjectId(data.userId.toString()));
         }
-        catch (error) {
-            return { status: 500, error: error.message };
+        const groupChat = await this.groupChatModel
+            .findByIdAndUpdate(data.groupChatId, { $pull: { members: { $in: pullValues } } }, { new: true })
+            .populate('members', 'username avatar')
+            .lean();
+        if (!groupChat) {
+            throw new common_1.NotFoundException('Group chat not found');
         }
+        return { message: 'Member removed successfully', groupChat: await this.hydrateMembers(groupChat) };
     }
     async addMessage(groupChatId, message) {
-        try {
-            const groupChat = await this.groupChatModel.findByIdAndUpdate(groupChatId, {
-                $push: { messages: message },
-                $set: { lastMessageAt: new Date() },
-            }, { new: true }).populate('messages.sender', 'username avatar');
-            return { message: 'Message added successfully', groupChat };
-        }
-        catch (error) {
-            return { status: 500, error: error.message };
-        }
+        const groupChat = await this.groupChatModel
+            .findByIdAndUpdate(groupChatId, {
+            $push: { messages: message },
+            $set: { lastMessageAt: new Date() },
+        }, { new: true })
+            .populate('messages.sender', 'username avatar');
+        return { message: 'Message added successfully', groupChat };
     }
     async deleteGroupChat(id, userId) {
-        try {
-            const groupChat = await this.groupChatModel.findById(id);
-            if (!groupChat) {
-                return { status: 404, error: 'Group chat not found' };
-            }
-            // Only creator can delete
-            if (groupChat.creator.toString() !== userId) {
-                return { status: 403, error: 'Only creator can delete this group chat' };
-            }
-            await this.groupChatModel.findByIdAndDelete(id);
-            return { message: 'Group chat deleted successfully' };
+        const groupChat = await this.groupChatModel.findById(id);
+        if (!groupChat) {
+            throw new common_1.NotFoundException('Group chat not found');
         }
-        catch (error) {
-            return { status: 500, error: error.message };
+        if (extractId(groupChat.creator) !== extractId(userId)) {
+            throw new common_1.ForbiddenException('Only creator can delete this group chat');
         }
+        await this.groupChatModel.findByIdAndDelete(id);
+        return { message: 'Group chat deleted successfully' };
     }
     async updateGroupChat(id, userId, updates) {
-        try {
-            const groupChat = await this.groupChatModel.findById(id);
-            if (!groupChat) {
-                return { status: 404, error: 'Group chat not found' };
-            }
-            // Only creator can update
-            if (groupChat.creator.toString() !== userId) {
-                return { status: 403, error: 'Only creator can update this group chat' };
-            }
-            const updated = await this.groupChatModel.findByIdAndUpdate(id, updates, {
-                new: true,
-            });
-            return { message: 'Group chat updated successfully', groupChat: updated };
+        const groupChat = await this.groupChatModel.findById(id);
+        if (!groupChat) {
+            throw new common_1.NotFoundException('Group chat not found');
         }
-        catch (error) {
-            return { status: 500, error: error.message };
+        if (extractId(groupChat.creator) !== extractId(userId)) {
+            throw new common_1.ForbiddenException('Only creator can update this group chat');
         }
+        const updated = await this.groupChatModel.findByIdAndUpdate(id, updates, {
+            new: true,
+        });
+        return { message: 'Group chat updated successfully', groupChat: updated };
     }
 };
 exports.GroupChatService = GroupChatService;
 exports.GroupChatService = GroupChatService = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)('groupchats')),
-    __metadata("design:paramtypes", [mongoose_2.Model])
+    __param(1, (0, mongoose_1.InjectModel)('users')),
+    __metadata("design:paramtypes", [mongoose_2.Model,
+        mongoose_2.Model])
 ], GroupChatService);
 //# sourceMappingURL=groupchat.service.js.map

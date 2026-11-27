@@ -22,23 +22,28 @@ const process_pdf_dto_1 = require("./dto/process-pdf.dto");
 const save_pdf_content_dto_1 = require("./dto/save-pdf-content.dto");
 const platform_express_1 = require("@nestjs/platform-express");
 const multer_options_1 = require("../upload/multer.options");
+const source_access_service_1 = require("../rag/source-access.service");
 let PdfController = class PdfController {
-    constructor(pdfService) {
+    constructor(pdfService, sourceAccess) {
         this.pdfService = pdfService;
+        this.sourceAccess = sourceAccess;
     }
     test() {
         return { msg: 'PDF Service Works!' };
     }
     async processPdf(courseId, body, req) {
+        await this.sourceAccess.assertCourseAccess(courseId, req.user?.id || req.user?._id);
         return await this.pdfService.processFileForCourse(courseId, body.filePath);
     }
     async processPdfUpload(courseId, file, req) {
         if (!file) {
             return { status: 400, error: 'No file uploaded' };
         }
+        await this.sourceAccess.assertCourseAccess(courseId, req.user?.id || req.user?._id);
         return await this.pdfService.processFileForCourse(courseId, file.path);
     }
     async getContent(courseId, req) {
+        await this.sourceAccess.assertCourseAccess(courseId, req.user?.id || req.user?._id);
         try {
             const content = await this.pdfService.getPdfContent(courseId);
             if (!content) {
@@ -69,6 +74,7 @@ let PdfController = class PdfController {
         }
     }
     async saveContent(body, req) {
+        await this.sourceAccess.assertCourseAccess(body.courseId, req.user?.id || req.user?._id);
         return await this.pdfService.savePdfContent(body.courseId, body.pdfText);
     }
 };
@@ -151,6 +157,7 @@ exports.PdfController = PdfController = __decorate([
     (0, swagger_1.ApiTags)('PDF'),
     (0, swagger_1.ApiBearerAuth)('jwt'),
     (0, common_1.Controller)('api/v1/pdf'),
-    __metadata("design:paramtypes", [pdf_service_1.PdfService])
+    __metadata("design:paramtypes", [pdf_service_1.PdfService,
+        source_access_service_1.SourceAccessService])
 ], PdfController);
 //# sourceMappingURL=pdf.controller.js.map

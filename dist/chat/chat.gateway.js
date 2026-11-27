@@ -17,21 +17,29 @@ const websockets_1 = require("@nestjs/websockets");
 const socket_io_1 = require("socket.io");
 const common_1 = require("@nestjs/common");
 const chat_service_1 = require("../chat/chat.service");
+const groupchat_service_1 = require("./groupchat.service");
 const jwt_1 = require("@nestjs/jwt");
+const ingestion_processor_1 = require("../rag/ingestion.processor");
+const rag_orchestrator_service_1 = require("../rag/rag-orchestrator.service");
 let ChatGateway = class ChatGateway {
-    constructor(chatService, jwtService) {
+    constructor(chatService, groupChatService, jwtService, ingestionProcessor, ragOrchestrator) {
         this.chatService = chatService;
+        this.groupChatService = groupChatService;
         this.jwtService = jwtService;
-        // Map to track active rooms and their users
+        this.ingestionProcessor = ingestionProcessor;
+        this.ragOrchestrator = ragOrchestrator;
         this.activeRooms = new Map();
         this.userSockets = new Map();
     }
     afterInit(server) {
         console.log('WebSocket Gateway initialized');
+        // Broadcast live document ingestion progress to course rooms (`course:<courseId>`)
+        this.ingestionProcessor.registerStatusEmitter((courseId, payload) => {
+            server.to(`course:${courseId}`).emit('source-status', payload);
+        });
     }
     async handleConnection(client) {
         try {
-            // Extract and verify JWT token
             const token = client.handshake.auth?.token;
             if (!token) {
                 client.disconnect();
@@ -44,12 +52,10 @@ let ChatGateway = class ChatGateway {
             }
             client.userId = decoded.id;
             client.username = decoded.username;
-            // Track user sockets
             if (!this.userSockets.has(decoded.id)) {
                 this.userSockets.set(decoded.id, new Set());
             }
             this.userSockets.get(decoded.id).add(client.id);
-            console.log(`User ${decoded.username} (${decoded.id}) connected`);
             client.emit('connected', { message: 'Connected to chat server', userId: decoded.id });
         }
         catch (error) {
@@ -59,7 +65,6 @@ let ChatGateway = class ChatGateway {
     }
     handleDisconnect(client) {
         if (client.userId) {
-            // Remove from userSockets map
             const userSockets = this.userSockets.get(client.userId);
             if (userSockets) {
                 userSockets.delete(client.id);
@@ -67,7 +72,6 @@ let ChatGateway = class ChatGateway {
                     this.userSockets.delete(client.userId);
                 }
             }
-            // Remove from all activeRooms and notify rooms
             for (const [roomId, users] of this.activeRooms.entries()) {
                 if (users.has(client.userId)) {
                     users.delete(client.userId);
@@ -81,16 +85,10 @@ let ChatGateway = class ChatGateway {
                     }
                 }
             }
-            console.log(`User ${client.username} (${client.userId}) disconnected`);
-        }
-        else {
-            console.log(`An unauthenticated socket disconnected: ${client.id}`);
         }
     }
-    // Join a chat room (1:1 or group)
     handleJoinRoom(client, data) {
         const { roomId, userName } = data;
-        // Ensure authenticated
         if (!client.userId) {
             client.disconnect();
             return;
@@ -100,18 +98,21 @@ let ChatGateway = class ChatGateway {
             this.activeRooms.set(roomId, new Set());
         }
         this.activeRooms.get(roomId).add(client.userId);
-        // Notify others in the room
         this.server.to(roomId).emit('user-joined', {
             userId: client.userId,
             userName,
             timestamp: new Date(),
             activeUsers: Array.from(this.activeRooms.get(roomId) || []),
         });
-        console.log(`User ${client.username} joined room ${roomId}`);
     }
-    // Send message in a room
+    /** Subscribe to live ingestion progress updates for a course notebook */
+    handleJoinCourse(client, data) {
+        if (!client.userId || !data?.courseId)
+            return;
+        client.join(`course:${data.courseId}`);
+    }
     async handleSendMessage(client, data) {
-        const { roomId, message, chatId, isGroupChat } = data;
+        const { roomId, message, chatId, groupChatId, isGroupChat, courseId, sourceIds, mode } = data;
         const messagePayload = {
             userId: client.userId,
             userName: client.username,
@@ -119,11 +120,67 @@ let ChatGateway = class ChatGateway {
             roomId,
             timestamp: new Date(),
             messageId: Date.now().toString(),
+            isAI: false,
         };
-        // Broadcast message to room
         this.server.to(roomId).emit('message', messagePayload);
-        // Optionally save to database
-        if (chatId) {
+        if (isGroupChat && groupChatId) {
+            try {
+                await this.groupChatService.addMessage(groupChatId, {
+                    role: 'user',
+                    content: message,
+                    sender: client.userId,
+                    senderName: client.username,
+                    date: new Date(),
+                });
+            }
+            catch (error) {
+                console.error('Error saving group chat message:', error);
+            }
+            // Check for @studygai mention -> route directly through Hybrid RAG Orchestrator (fixes prior stripped-mention bug!)
+            const hasMention = /@studygai/i.test(message);
+            if (hasMention && courseId) {
+                try {
+                    const query = message.replace(/@studygai\s*/gi, '').trim() || message;
+                    const response = await this.chatService.send([{ role: 'user', content: query }], courseId, {
+                        userId: client.userId,
+                        sourceIds,
+                        mode,
+                    });
+                    const aiContent = response?.content ||
+                        response?.choices?.[0]?.message?.content ||
+                        'I could not generate a response.';
+                    const aiPayload = {
+                        userId: 'studygai',
+                        userName: 'StudyGAI',
+                        message: aiContent,
+                        citations: response?.citations || [],
+                        retrievalMeta: response?.retrievalMeta,
+                        roomId,
+                        timestamp: new Date(),
+                        isAI: true,
+                    };
+                    this.server.to(roomId).emit('ai-message', aiPayload);
+                    await this.groupChatService.addMessage(groupChatId, {
+                        role: 'assistant',
+                        content: aiContent,
+                        senderName: 'StudyGAI',
+                        date: new Date(),
+                        isAI: true,
+                    });
+                }
+                catch (aiError) {
+                    this.server.to(roomId).emit('ai-message', {
+                        userId: 'studygai',
+                        userName: 'StudyGAI',
+                        message: `Sorry, I encountered an error: ${aiError?.message || 'Unknown error'}`,
+                        roomId,
+                        timestamp: new Date(),
+                        isAI: true,
+                    });
+                }
+            }
+        }
+        else if (chatId) {
             try {
                 await this.chatService.addMessageToChat(chatId, {
                     role: 'user',
@@ -138,24 +195,35 @@ let ChatGateway = class ChatGateway {
             }
         }
     }
-    // Send AI response
     async handleAIMessage(client, data) {
-        const { roomId, messages, courseId, chatId } = data;
+        const { roomId, messages, courseId, chatId, groupChatId, sourceIds, mode } = data;
         try {
-            // Get AI response
-            const response = await this.chatService.send(messages, courseId);
+            const response = await this.chatService.send(messages, courseId, {
+                userId: client.userId,
+                sourceIds,
+                mode,
+            });
             const aiMessage = {
-                userId: 'ai-assistant',
-                userName: 'AI Assistant',
-                message: response.choices?.[0]?.message?.content || 'No response',
+                userId: 'studygai',
+                userName: 'StudyGAI',
+                message: response?.content || response?.choices?.[0]?.message?.content || 'No response',
+                citations: response?.citations || [],
+                retrievalMeta: response?.retrievalMeta,
                 roomId,
                 timestamp: new Date(),
                 isAI: true,
             };
-            // Broadcast AI response
             this.server.to(roomId).emit('ai-message', aiMessage);
-            // Save to database
-            if (chatId) {
+            if (groupChatId) {
+                await this.groupChatService.addMessage(groupChatId, {
+                    role: 'assistant',
+                    content: aiMessage.message,
+                    senderName: 'StudyGAI',
+                    date: new Date(),
+                    isAI: true,
+                });
+            }
+            else if (chatId) {
                 await this.chatService.addMessageToChat(chatId, {
                     role: 'assistant',
                     content: aiMessage.message,
@@ -170,7 +238,6 @@ let ChatGateway = class ChatGateway {
             });
         }
     }
-    // Typing indicator
     handleTyping(client, data) {
         const { roomId, isTyping } = data;
         this.server.to(roomId).emit('user-typing', {
@@ -179,7 +246,6 @@ let ChatGateway = class ChatGateway {
             isTyping,
         });
     }
-    // Leave room
     handleLeaveRoom(client, data) {
         const { roomId } = data;
         client.leave(roomId);
@@ -196,14 +262,21 @@ let ChatGateway = class ChatGateway {
             timestamp: new Date(),
         });
     }
-    // Stream AI response
     async handleAIStream(client, data) {
-        const { roomId, messages, courseId, chatId } = data;
+        const { roomId, messages, courseId, chatId, sourceIds, mode } = data;
         try {
-            const stream = await this.chatService.sendStream(messages, courseId);
+            const ragStream = await this.chatService.sendStream(messages, courseId, {
+                userId: client.userId,
+                sourceIds,
+                mode,
+            });
+            this.server.to(roomId).emit('ai-stream-meta', {
+                strategy: ragStream.strategy,
+                citations: ragStream.citations,
+                timestamp: new Date(),
+            });
             let fullContent = '';
-            for await (const chunk of stream) {
-                const content = chunk.choices[0]?.delta?.content || '';
+            for await (const content of ragStream.stream) {
                 if (content) {
                     fullContent += content;
                     this.server.to(roomId).emit('ai-stream-chunk', {
@@ -212,7 +285,6 @@ let ChatGateway = class ChatGateway {
                     });
                 }
             }
-            // Save full message to database
             if (chatId) {
                 await this.chatService.addMessageToChat(chatId, {
                     role: 'assistant',
@@ -220,7 +292,9 @@ let ChatGateway = class ChatGateway {
                     date: new Date(),
                 });
             }
+            const verifiedCitations = this.ragOrchestrator.markCitedReferences(fullContent, ragStream.citations);
             this.server.to(roomId).emit('ai-stream-done', {
+                citations: verifiedCitations,
                 timestamp: new Date(),
             });
         }
@@ -231,7 +305,6 @@ let ChatGateway = class ChatGateway {
             });
         }
     }
-    // Get active users in room
     handleGetActiveUsers(client, data) {
         const { roomId } = data;
         const activeUsers = this.activeRooms.get(roomId);
@@ -255,6 +328,14 @@ __decorate([
     __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", void 0)
 ], ChatGateway.prototype, "handleJoinRoom", null);
+__decorate([
+    (0, websockets_1.SubscribeMessage)('join-course'),
+    __param(0, (0, websockets_1.ConnectedSocket)()),
+    __param(1, (0, websockets_1.MessageBody)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", void 0)
+], ChatGateway.prototype, "handleJoinCourse", null);
 __decorate([
     (0, websockets_1.SubscribeMessage)('send-message'),
     __param(0, (0, websockets_1.ConnectedSocket)()),
@@ -310,6 +391,9 @@ exports.ChatGateway = ChatGateway = __decorate([
     }),
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [chat_service_1.ChatService,
-        jwt_1.JwtService])
+        groupchat_service_1.GroupChatService,
+        jwt_1.JwtService,
+        ingestion_processor_1.IngestionProcessor,
+        rag_orchestrator_service_1.RagOrchestratorService])
 ], ChatGateway);
 //# sourceMappingURL=chat.gateway.js.map

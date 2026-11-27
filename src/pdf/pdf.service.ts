@@ -8,6 +8,7 @@ import { basename } from 'path';
 import { DoclingService } from '../docling/docling.service';
 import { QdrantService } from '../qdrant/qdrant.service';
 import { CacheService } from '../cache/cache.service';
+import { SourcesService } from '../rag/sources.service';
 
 // Import pdf-parse as fallback
 const pdfParse = require('pdf-parse');
@@ -29,6 +30,7 @@ export class PdfService {
     @InjectModel('courses') private courseModel: Model<CourseDocument>,
     private doclingService: DoclingService,
     private cache: CacheService,
+    private sourcesService: SourcesService,
   ) {}
 
   /**
@@ -247,6 +249,14 @@ async savePdfContent(
       const cached = await this.cache.get<{ pdfMarkdown?: string; pdfContent?: string }>(`course:pdf:${courseId}`);
       if (cached?.pdfMarkdown) return cached.pdfMarkdown;
 
+      // Prefer active multi-source notebook content (RAG v2)
+      const multiSource = await this.sourcesService.getEnabledSourcesContent(courseId, undefined, 240_000);
+      if (multiSource.combinedMarkdown && multiSource.combinedMarkdown.trim().length > 0) {
+        await this.cache.set(`course:pdf:${courseId}`, { pdfMarkdown: multiSource.combinedMarkdown }, 300);
+        return multiSource.combinedMarkdown;
+      }
+
+      // Backward-compatible fallback for legacy single-PDF courses
       const course = await this.courseModel
         .findById(courseId)
         .select('pdfContent pdfMarkdown')

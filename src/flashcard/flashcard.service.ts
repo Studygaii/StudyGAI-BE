@@ -6,6 +6,8 @@ import { default as mongoose } from 'mongoose';
 import { CourseDocument } from '../schemas/course.schema';
 import { GroqService } from '../common/groq.service';
 import { QdrantService } from '../qdrant/qdrant.service';
+import { SourcesService } from '../rag/sources.service';
+import { MasteryService } from '../rag/mastery.service';
 
 @Injectable()
 export class FlashcardService {
@@ -13,6 +15,8 @@ export class FlashcardService {
     @InjectModel('courses') private courseModel: Model<CourseDocument>, // operate on courses
     private groqService: GroqService, // inject Groq service
     private qdrantService: QdrantService, // inject Qdrant service for vector search
+    private sourcesService: SourcesService, // inject multi-source notebook content service
+    private masteryService: MasteryService, // feed Anki review signals into Mastery-Aware RAG
   ) {}
 
   // Add flashcards to a course (bulk create)
@@ -165,6 +169,12 @@ export class FlashcardService {
       }
 
       await course.save();
+
+      // Update per-concept learner mastery profile for Adaptive RAG
+      await this.masteryService
+        .recordFlashcardOutcome(uid, courseId, { front: card.front, tags: card.tags }, rating)
+        .catch(() => undefined);
+
       return { message: 'Card reviewed', cardIndex, card };
     } catch (error) {
       return { status: 500, error: error.message };
@@ -234,11 +244,30 @@ export class FlashcardService {
         return { status: 403, error: 'Only course members can generate flashcards' };
       }
 
-      // Check if PDF content exists
-      if (!course.pdfContent || course.pdfContent.trim().length === 0) {
+      // Resolve source content: topic-targeted Hybrid RAG -> active multi-source notebook -> legacy course.pdfContent
+      let sourceContent = '';
+      const multiSource = await this.sourcesService.getEnabledSourcesContent(courseId, undefined, 200_000);
+
+      if (topic && topic.trim().length > 0 && multiSource.sources.length > 0) {
+        const blobIds = multiSource.sources.map((s) => s.blobId);
+        const hits = await this.qdrantService
+          .hybridSearch({ query: topic, blobIds, limit: 24, rerankTopK: 12 })
+          .catch(() => []);
+        if (hits.length > 0) {
+          sourceContent = hits
+            .map((h) => `[${h.sourceName} | ${h.sectionPath} | p.${h.pageNumber}]\n${h.text}`)
+            .join('\n\n');
+        }
+      }
+
+      if (!sourceContent) {
+        sourceContent = multiSource.combinedMarkdown || course.pdfMarkdown || course.pdfContent || '';
+      }
+
+      if (!sourceContent || sourceContent.trim().length === 0) {
         return {
           status: 400,
-          error: 'No PDF content found. Please upload a PDF to the course first.',
+          error: 'No source content found. Please upload documents to the course first.',
         };
       }
 
@@ -246,7 +275,7 @@ export class FlashcardService {
 
       // Call Groq to generate flashcards
       const genResult = await this.groqService.generateFlashcardsFromPDF(
-        course.pdfContent,
+        sourceContent,
         course.title,
       );
 
